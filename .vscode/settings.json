@@ -1,0 +1,9 @@
+{
+  "python.defaultInterpreterPath": "/Users/yr001/Documents/New project/.venv311/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.cwd": "/Users/yr001/Documents/New project",
+  "files.exclude": {
+    "**/.venv": true,
+    "**/.venv311": true
+  }
+}
