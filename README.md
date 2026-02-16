@@ -30,6 +30,56 @@ pip install -U pip
 pip install -e .
 ```
 
+## 跨机器完整部署（含环境自检 + 依赖补齐 + ASR 模型迁移）
+
+当目标机器环境不一致时，推荐使用仓库内置的部署包流程：
+
+### 1) 在当前机器打包
+
+示例（打包 `faster-whisper` 的 `large-v3` 本地模型）：
+
+```bash
+python3 scripts/build_subgen_bundle.py \
+  --asr-engine faster-whisper \
+  --asr-model large-v3
+```
+
+打包结果：
+
+- `dist/subgen-bundle-.../`：部署目录（含源码、wheels、模型缓存、部署脚本）
+- `dist/subgen-bundle-....tar.gz`：可直接拷贝到目标机器的压缩包
+
+### 2) 在目标机器部署
+
+解压后进入部署目录执行：
+
+```bash
+python3 deploy_subgen_bundle.py --bundle-dir .
+```
+
+部署脚本会自动执行：
+
+- Python 版本检测（要求 `>=3.10`）
+- `ffmpeg` 检测（默认尝试自动安装，失败则告警）
+- 虚拟环境创建（`./.venv`）
+- 依赖安装：优先离线 `wheels`，失败自动回退在线安装
+- 恢复 ASR 模型缓存（`faster-whisper` 或 `whisper`）
+- 生成启动脚本：`run_subgen.sh`、`run_subgen_gui.sh`
+
+### 3) 运行
+
+```bash
+./run_subgen.sh /path/to/video.mp4
+./run_subgen_gui.sh
+```
+
+可选参数：
+
+- 完全离线安装：`python3 deploy_subgen_bundle.py --bundle-dir . --mode offline`
+- 强制在线安装：`python3 deploy_subgen_bundle.py --bundle-dir . --mode online`
+- 禁止自动安装 ffmpeg：`python3 deploy_subgen_bundle.py --bundle-dir . --no-auto-ffmpeg`
+- 打包时模型仅离线缓存（缺失立即失败）：`python3 scripts/build_subgen_bundle.py --asr-engine faster-whisper --asr-model medium --model-offline-only`
+
 ## ASR 引擎与模型
 
 - GUI 可选 ASR：`whisper` / `faster-whisper`
