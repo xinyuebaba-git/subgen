@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subgen"
+version = "0.1.0"
+description = "Local Whisper subtitle generator with contextual Chinese translation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "faster-whisper>=1.1.1",
+  "openai>=1.60.0",
+  "tqdm>=4.67.1",
+  "tkinterdnd2>=0.4.3"
+]
+
+[project.scripts]
+subgen = "subgen.cli:main"
+subgen-gui = "subgen.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

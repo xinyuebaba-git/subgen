@@ -1,0 +1,3 @@
+[console_scripts]
+subgen = subgen.cli:main
+subgen-gui = subgen.gui:main
