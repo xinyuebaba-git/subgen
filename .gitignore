@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .venv311/
+.DS_Store
+*.egg-info/
 subtitles/
 config/translation.toml
