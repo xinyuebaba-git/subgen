@@ -182,6 +182,164 @@ subgen /path/video.mp4 \
   --translate-model deepseek-chat
 ```
 
+## 网页视频抓取下载（LLM 策略）
+
+新增命令 `webvidgrab`，用于：
+
+1. 抓取你指定的网页源码；
+2. 从 HTML/脚本中提取分散的视频候选链接；
+3. 把页面信息交给大模型分析并生成下载策略；
+4. 将视频保存到你指定的本地目录。
+
+示例：
+
+```bash
+webvidgrab "https://example.com/page-with-video" \
+  --output-dir "/path/to/save/videos" \
+  --backend openai \
+  --model gpt-4.1-mini
+```
+
+仅查看策略不下载：
+
+```bash
+webvidgrab "https://example.com/page-with-video" \
+  --output-dir "./downloads" \
+  --dry-run
+```
+
+说明：
+
+- 直链（如 `mp4/webm`）会直接下载。
+- `m3u8` 流会调用 `ffmpeg` 下载并封装（需本机可用 `ffmpeg`）。
+- 若站点需要登录，可传登录参数，程序会先登录并复用同一会话 Cookie 抓取和下载。
+
+示例（需要登录）：
+
+```bash
+webvidgrab "https://example.com/protected/video-page" \
+  --output-dir "./downloads" \
+  --login-url "https://example.com/login" \
+  --username "your_user" \
+  --password "your_pass" \
+  --username-field "email" \
+  --password-field "password" \
+  --login-extra "csrf_token=xxx" \
+  --login-extra "remember=true"
+```
+
+### YouTube（复用已登录浏览器会话）
+
+如果你已经在浏览器登录了 YouTube，推荐直接让程序使用浏览器会话 Cookie（无需账号密码）：
+
+```bash
+webvidgrab "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --output-dir "./downloads" \
+  --cookies-from-browser chrome
+```
+
+可选指定浏览器 Profile：
+
+```bash
+webvidgrab "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --output-dir "./downloads" \
+  --cookies-from-browser chrome \
+  --cookies-profile "Default"
+```
+
+也可使用导出的 `cookies.txt`：
+
+```bash
+webvidgrab "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --output-dir "./downloads" \
+  --cookies-file "/path/to/cookies.txt"
+```
+
+说明：
+- YouTube 链接会自动走 `yt-dlp` 下载通道（需安装 `yt-dlp`）。
+- GUI 中也支持选择 Cookies 文件和浏览器会话。
+- 若出现 `n challenge solving failed`，可切换 `YouTube EJS源`（`github`/`npm`），并启用“失败时自动列出格式”查看可用格式。
+- 程序会保存完整 `yt-dlp` stdout/stderr 到日志文件（默认在 `logs/webvidgrab/`），也可用 `--yt-log-file` 指定路径。
+
+YouTube 排障示例：
+
+```bash
+webvidgrab "https://www.youtube.com/watch?v=VIDEO_ID" \
+  --output-dir "./downloads" \
+  --cookies-from-browser chrome \
+  --cookies-profile "Default" \
+  --yt-ejs-source github \
+  --yt-list-formats-on-fail
+```
+
+可进一步指定 extractor args（默认已内置）：
+
+```bash
+--yt-extractor-args "youtube:player_client=web,web_safari"
+```
+
+若仍出现 `n challenge solving failed`，可补充令牌参数：
+
+```bash
+--yt-po-token "YOUR_PO_TOKEN" \
+--yt-visitor-data "YOUR_VISITOR_DATA"
+```
+
+也可以直接提供浏览器导出的 HAR，让程序自动提取：
+
+```bash
+--yt-har-file "/path/to/youtube.har"
+```
+
+若 HAR 未包含完整字段，程序会自动再从 YouTube 页面源码尝试二次提取。
+
+### GUI 界面
+
+可启动可视化界面，填写网页 URL、保存目录、后端和模型后，一键执行：
+
+```bash
+webvidgrab-gui
+```
+
+如果你只想做 YouTube 参数探测（精简版，仅关注 cookies/HAR/token/格式可见性）：
+
+```bash
+webvidgrab-youtube-gui
+```
+
+### 站点切片下载器（独立于YouTube工具）
+
+新增 GUI 命令：`webvidgrab-site-gui`
+
+用途：
+- 输入任意网页视频播放页 URL
+- 自动探测页面中的分片/清单地址（如 m3u8/mpd/mp4）
+- 优先选择高分辨率候选
+- 自动下载并合并为一个完整视频（依赖 yt-dlp + ffmpeg）
+
+运行：
+
+```bash
+webvidgrab-site-gui
+```
+
+说明：
+- 若勾选“运行时探测”，程序会打开浏览器监听页面播放请求，再做切片分析。
+- 日志保存在：`logs/sitegrab/`
+
+精简版支持“自动抓取Token”按钮（会打开受控 Chrome 监听页面请求），
+若本机未安装 Playwright，请先执行：
+
+```bash
+python -m pip install playwright
+```
+
+GUI 设计复用了 `subgen` 的后端调用配置思路：
+
+- 后端固定为 `local/openai/deepseek`
+- 默认模型与默认 Base URL 与 `subgen` 保持一致
+- 在线后端配置继续读取 `config/translation.toml`
+
 ## GUI（拖拽 + 可视化）
 
 安装依赖后可直接启动图形界面：

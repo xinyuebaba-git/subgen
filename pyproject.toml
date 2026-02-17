@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "subgen"
+name = "PSiteDL"
 version = "0.1.0"
-description = "Local Whisper subtitle generator with contextual Chinese translation"
+description = "PSiteDL: webpage segmented video detector and downloader"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,6 +18,13 @@ dependencies = [
 [project.scripts]
 subgen = "subgen.cli:main"
 subgen-gui = "subgen.gui:main"
+webvidgrab = "webvidgrab.cli:main"
+webvidgrab-gui = "webvidgrab.gui:main"
+webvidgrab-youtube-gui = "webvidgrab.youtube_gui:main"
+webvidgrab-site = "webvidgrab.site_cli:main"
+webvidgrab-site-gui = "webvidgrab.site_gui:main"
+psitedl = "webvidgrab.site_cli:main"
+psitedl-gui = "webvidgrab.site_gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
