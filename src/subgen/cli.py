@@ -1874,6 +1874,165 @@ def redistribute_translated_by_source_timestamps(
     return output
 
 
+def _parse_strict_json_array(text: str) -> list[dict[str, Any]]:
+    raw = _extract_json(text)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [x for x in parsed if isinstance(x, dict)]
+    except Exception:
+        pass
+    m = re.search(r"\[\s*\{.*\}\s*\]", raw, flags=re.S)
+    if not m:
+        return []
+    try:
+        parsed = json.loads(m.group(0))
+        if isinstance(parsed, list):
+            return [x for x in parsed if isinstance(x, dict)]
+    except Exception:
+        return []
+    return []
+
+
+def translate_fulltext_then_llm_refill(
+    entries: Sequence[SubtitleEntry],
+    model_name: str,
+    max_tokens: int,
+    base_url: str,
+    api_key: str,
+    progress_label: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> list[str]:
+    if not entries:
+        return []
+
+    from openai import OpenAI
+
+    use_ollama_native_params = _is_local_ollama_qwen25(
+        model_name, base_url
+    ) or _is_local_ollama_dolphin(model_name, base_url)
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    total_count = float(len(entries))
+
+    _emit_progress(
+        progress_callback,
+        task="translate",
+        current=0.0,
+        total=total_count,
+        label=progress_label,
+    )
+    source_plain_text = "\n".join(e.text for e in entries if (e.text or "").strip())
+    doc_prompt = (
+        "You are an expert subtitle translator.\n"
+        "Translate the following full source script into natural Simplified Chinese.\n"
+        "Return ONLY translated Chinese full text. Do not include JSON or explanations."
+    )
+    full_zh_text = _chat_completion_text(
+        client=client,
+        model_name=model_name,
+        messages=[
+            {"role": "system", "content": doc_prompt},
+            {"role": "user", "content": source_plain_text},
+        ],
+        base_url=base_url,
+        use_ollama_native_params=use_ollama_native_params,
+    ).strip()
+
+    _emit_progress(
+        progress_callback,
+        task="translate",
+        current=total_count,
+        total=total_count,
+        label=progress_label,
+    )
+    _emit_progress(
+        progress_callback,
+        task="align",
+        current=0.0,
+        total=total_count,
+        label=progress_label,
+    )
+
+    # Ask the model to perform ordered semantic refill by source timestamp lines.
+    batches = _build_token_limited_batches(entries, max_tokens=max(600, max_tokens))
+    output = [e.text for e in entries]
+    done = 0.0
+    for batch_start, batch_end in batches:
+        batch = entries[batch_start:batch_end]
+        refill_payload = {
+            "task": (
+                "Refill Chinese subtitle lines in order.\n"
+                "Given source lines with timestamps and full translated Chinese text,\n"
+                "find the closest semantic sentence(s) and assign concise zh to each source id.\n"
+                "Not strict 1:1 by punctuation; split/merge by context naturally, but keep order."
+            ),
+            "full_translated_chinese": full_zh_text,
+            "source_with_timestamps": [
+                {
+                    "id": i,
+                    "start": batch[i].start,
+                    "end": batch[i].end,
+                    "source": batch[i].text,
+                }
+                for i in range(len(batch))
+            ],
+            "output_schema": [{"id": 0, "zh": "..."}],
+            "constraints": [
+                "Return STRICT JSON array only.",
+                "Exactly one item for each id in current batch.",
+                "zh must be Simplified Chinese, concise subtitle style.",
+                "Do not leave English unless source is a proper noun/term.",
+            ],
+        }
+        refill_prompt = (
+            "You are a subtitle alignment editor.\n"
+            "Execute semantic matching and refill Chinese lines by source order and timing."
+        )
+        refill_text = _chat_completion_text(
+            client=client,
+            model_name=model_name,
+            messages=[
+                {"role": "system", "content": refill_prompt},
+                {"role": "user", "content": json.dumps(refill_payload, ensure_ascii=False)},
+            ],
+            base_url=base_url,
+            use_ollama_native_params=use_ollama_native_params,
+        )
+        parsed = _parse_strict_json_array(refill_text)
+        batch_map = {
+            int(item["id"]): str(item["zh"]).strip()
+            for item in parsed
+            if "id" in item and "zh" in item
+        }
+        for i, e in enumerate(batch):
+            idx = batch_start + i
+            candidate = batch_map.get(i, "").strip()
+            if not candidate:
+                candidate = e.text
+            if _looks_like_untranslated(e.text, candidate):
+                candidate = _retry_translate_if_needed(
+                    client=client,
+                    model_name=model_name,
+                    source_text=e.text,
+                    current_text=candidate,
+                    prev_ctx=[x.text for x in batch[max(0, i - 2) : i]],
+                    next_ctx=[x.text for x in batch[i + 1 : i + 3]],
+                    base_url=base_url,
+                    use_ollama_native_params=use_ollama_native_params,
+                )
+            output[idx] = candidate or e.text
+            done += 1.0
+        _emit_progress(
+            progress_callback,
+            task="align",
+            current=done,
+            total=total_count,
+            label=progress_label,
+        )
+
+    return output
+
+
 def main() -> None:
     args = parse_args()
     videos = expand_videos(args.videos)
@@ -1936,18 +2095,9 @@ def main() -> None:
         print(f"Source subtitles: {source_srt}")
 
         if do_translate:
-            zh_texts = translate_entries_contextual(
+            print("Running full-text translation + LLM semantic refill...")
+            zh_texts = translate_fulltext_then_llm_refill(
                 entries,
-                model_name=translation_settings["model"],
-                max_tokens=args.translation_max_tokens,
-                base_url=translation_settings["base_url"],
-                api_key=translation_settings["api_key"],
-                progress_label=video.name,
-            )
-            print("Running translation realignment by source timestamps...")
-            zh_texts = redistribute_translated_by_source_timestamps(
-                entries,
-                zh_texts,
                 model_name=translation_settings["model"],
                 base_url=translation_settings["base_url"],
                 api_key=translation_settings["api_key"],

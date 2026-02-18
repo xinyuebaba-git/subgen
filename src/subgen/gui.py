@@ -27,12 +27,11 @@ from subgen.cli import (
     expand_videos,
     read_srt,
     resegment_translated_entries,
-    redistribute_translated_by_source_timestamps,
+    translate_fulltext_then_llm_refill,
     resolve_translation_settings,
     resolve_deepgram_settings,
     save_deepgram_settings,
     transcribe_with_asr_engine,
-    translate_entries_contextual,
     write_srt,
 )
 
@@ -730,19 +729,9 @@ class App:
                         self._log(f"使用 OpenAI 翻译模型: {translate_model}")
                     else:
                         self._log(f"使用 DeepSeek 翻译模型: {translate_model}")
-                    zh = translate_entries_contextual(
+                    self._log("正在执行：全文翻译 + 按时间戳语义回填...")
+                    zh = translate_fulltext_then_llm_refill(
                         entries,
-                        model_name=translate_model,
-                        max_tokens=max_tokens,
-                        base_url=translate_base_url,
-                        api_key=translate_api_key,
-                        progress_label=video.name,
-                        progress_callback=on_progress,
-                    )
-                    self._log("正在进行译文二次校正（按原文时间戳对齐）...")
-                    zh = redistribute_translated_by_source_timestamps(
-                        entries,
-                        zh,
                         model_name=translate_model,
                         base_url=translate_base_url,
                         api_key=translate_api_key,
