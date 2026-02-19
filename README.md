@@ -309,7 +309,13 @@ webvidgrab-youtube-gui
 
 ### 站点切片下载器（独立于YouTube工具）
 
-新增 GUI 命令：`webvidgrab-site-gui`
+CLI 命令（等价）：
+- `psitedl`
+- `webvidgrab-site`
+
+GUI 命令（等价）：
+- `psitedl-gui`
+- `webvidgrab-site-gui`
 
 用途：
 - 输入任意网页视频播放页 URL
@@ -317,15 +323,56 @@ webvidgrab-youtube-gui
 - 优先选择高分辨率候选
 - 自动下载并合并为一个完整视频（依赖 yt-dlp + ffmpeg）
 
-运行：
+命令行运行：
 
 ```bash
-webvidgrab-site-gui
+psitedl "https://example.com/video-page" \
+  --output-dir "/absolute/path/to/downloads" \
+  --browser chrome \
+  --profile Default \
+  --capture-seconds 30
+```
+
+GUI 运行：
+
+```bash
+psitedl-gui
 ```
 
 说明：
 - 若勾选“运行时探测”，程序会打开浏览器监听页面播放请求，再做切片分析。
 - 日志保存在：`logs/sitegrab/`
+
+命令行参数：
+- `url`：网页播放页 URL（必填）
+- `--output-dir`：输出目录（默认 `~/Downloads`）
+- `--browser`：`chrome|chromium|edge|brave`
+- `--profile`：浏览器 profile（默认 `Default`）
+- `--capture-seconds`：运行时探测秒数（默认 `30`）
+- `--no-runtime-capture`：只用 HTML 探测，不打开浏览器
+
+返回码约定（适合 Agent 判定）：
+- `0`：成功下载，标准输出会包含一行 `[saved] /abs/path/file.mp4`
+- `1`：失败，标准输出会包含 `[error] 未下载到视频。请查看日志。`
+- 无论成功失败，都会输出 `[log] /abs/path/to/sitegrab-*.log`
+
+标准输出关键标记（建议 Agent 解析）：
+- `[saved]`：最终下载文件绝对路径
+- `[log]`：运行日志路径
+- `[error]`：失败提示
+
+日志关键字段（`logs/sitegrab/sitegrab-*.log`）：
+- `[url]`、`[browser]`、`[page-title]`
+- `[runtime-candidates]`、`[all-candidates]`、`[selected-url]`
+- `[download-exit]`（0 表示 yt-dlp 成功）
+- `[runtime-capture] ...`（年龄确认自动点击过程）
+
+AI Agent 调用建议（稳定模式）：
+1. 使用绝对路径输出目录：`--output-dir /abs/path`
+2. 默认开启运行时探测，不要加 `--no-runtime-capture`
+3. 执行后先读进程退出码，再解析 stdout 的 `[saved]` 与 `[log]`
+4. 若退出码非 0，读取 `[log]` 文件并定位 `[fatal]`、`[download-exit]`、`[selected-url]`
+5. 同一 URL 重试时可提高 `--capture-seconds`（如 `45`）
 
 精简版支持“自动抓取Token”按钮（会打开受控 Chrome 监听页面请求），
 若本机未安装 Playwright，请先执行：
