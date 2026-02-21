@@ -59,6 +59,7 @@ TOKEN_RECOMMENDATIONS = {
     "local": "推荐: 1200-2500（本地模型）",
     "openai": "推荐: 6000-10000（OpenAI）",
     "deepseek": "推荐: 6000-10000（DeepSeek）",
+    "qwen": "推荐: 6000-10000（百炼Qwen）",
 }
 
 LOCAL_TRANSLATION_MODELS = [
@@ -214,8 +215,8 @@ class App:
         self.dnd_reason = dnd_reason or ""
 
         self.output_dir = tk.StringVar(value=str(Path("./subtitles").resolve()))
-        self.asr_engine = tk.StringVar(value="faster-whisper")
-        self.whisper_model = tk.StringVar(value="medium")
+        self.asr_engine = tk.StringVar(value="deepgram")
+        self.whisper_model = tk.StringVar(value="enhanced")
         _dg_key, _ = resolve_deepgram_settings(
             api_key=os.getenv("DEEPGRAM_API_KEY", ""),
             model_name="",
@@ -224,11 +225,11 @@ class App:
         self.deepgram_api_key = tk.StringVar(value=_dg_key)
         self.max_duration = tk.StringVar(value="2.2")
         self.translate_enabled = tk.BooleanVar(value=True)
-        self.translate_model = tk.StringVar(value=BACKEND_DEFAULTS["local"]["model"])
-        self.translate_backend = tk.StringVar(value="local")
+        self.translate_model = tk.StringVar(value=BACKEND_DEFAULTS["qwen"]["model"])
+        self.translate_backend = tk.StringVar(value="qwen")
         self.ollama_status_text = tk.StringVar(value="检测中...")
         self.translate_max_tokens = tk.StringVar(value="2000")
-        self.max_tokens_hint = tk.StringVar(value=TOKEN_RECOMMENDATIONS["local"])
+        self.max_tokens_hint = tk.StringVar(value=TOKEN_RECOMMENDATIONS["qwen"])
         self.current_file_text = tk.StringVar(value="当前文件: -")
         self.asr_progress_var = tk.DoubleVar(value=0.0)
         self.asr_progress_text = tk.StringVar(value="ASR: 0.0%")
@@ -335,7 +336,7 @@ class App:
         self.translate_backend_combo = ttk.Combobox(
             trans_frame,
             textvariable=self.translate_backend,
-            values=["local", "openai", "deepseek"],
+            values=["local", "openai", "deepseek", "qwen"],
             width=18,
             state="readonly",
         )
@@ -575,7 +576,7 @@ class App:
         if not whisper_model:
             messagebox.showerror("参数错误", "ASR 模型不能为空。")
             return
-        asr_engine = self.asr_engine.get().strip() or "faster-whisper"
+        asr_engine = self.asr_engine.get().strip() or "deepgram"
         deepgram_api_key = self.deepgram_api_key.get().strip()
         if asr_engine == "deepgram" and not deepgram_api_key:
             deepgram_api_key, resolved_model = resolve_deepgram_settings(
@@ -727,6 +728,8 @@ class App:
                             self._log("本地模型策略: 已启用逐行上下文翻译与重复行纠正")
                     elif translate_backend == "openai":
                         self._log(f"使用 OpenAI 翻译模型: {translate_model}")
+                    elif translate_backend == "qwen":
+                        self._log(f"使用 百炼Qwen 翻译模型: {translate_model}")
                     else:
                         self._log(f"使用 DeepSeek 翻译模型: {translate_model}")
                     self._log("正在执行：全文翻译 + 按时间戳语义回填...")
@@ -771,7 +774,7 @@ class App:
         self._refresh_asr_model_choices()
 
     def _refresh_asr_model_choices(self) -> None:
-        engine = (self.asr_engine.get().strip() or "faster-whisper").lower()
+        engine = (self.asr_engine.get().strip() or "deepgram").lower()
         try:
             choices = get_asr_model_choices(engine)
         except Exception:
@@ -1064,6 +1067,7 @@ class App:
             "local": "local",
             "openai": "openai",
             "deepseek": "deepseek",
+            "qwen": "qwen",
         }
         return mapping.get(normalized, "local")
 

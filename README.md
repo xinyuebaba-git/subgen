@@ -3,14 +3,15 @@
 一个用于自动字幕生成的命令行工具：
 
 1. 指定一个或多个视频文件。
-2. 调用本地 ASR（`whisper` 或 `faster-whisper`）生成源字幕（`.source.srt`）。
+2. 调用 ASR（`whisper` / `faster-whisper` / `deepgram`）生成源字幕（`.source.srt`）。
 3. 调用翻译大模型，结合前后文翻译为简体中文（`.zh-CN.srt`）。
 
 ## 特性
 
 - 本地语音识别（Whisper）
-- 支持 ASR 引擎：`whisper`、`faster-whisper`（首次使用可自动安装依赖）
-- 默认本地大模型翻译（Ollama）
+- 支持 ASR 引擎：`whisper`、`faster-whisper`、`deepgram`
+- 默认 ASR：`deepgram`，默认模型：`enhanced`
+- 默认翻译后端：阿里百炼 Qwen（Coding API）
 - 批量视频处理
 - 更短时间轴切分（默认 `2.2s`）以提升字幕同步
 - 翻译时注入上下文窗口，提升术语一致性和语句自然度
@@ -82,7 +83,7 @@ python3 deploy_subgen_bundle.py --bundle-dir .
 
 ## ASR 引擎与模型
 
-- GUI 可选 ASR：`whisper` / `faster-whisper`
+- GUI 可选 ASR：`whisper` / `faster-whisper` / `deepgram`
 - 切换引擎后，模型下拉会按该引擎支持列表更新（如 `small`、`medium`、`large`）
 - 首次使用某引擎时，若本机未安装对应包会自动安装；首次加载模型会自动下载权重
 
@@ -94,9 +95,9 @@ python3 deploy_subgen_bundle.py --bundle-dir .
 - [OpenAI Whisper](https://github.com/openai/whisper)
 - [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper)
 
-## 本地翻译模型准备（推荐）
+## 本地翻译模型准备（可选）
 
-默认翻译后端是本地 Ollama（无需云端 API Key）：
+如果你想改用本地 Ollama，可准备本地翻译模型：
 
 ```bash
 # 安装 Ollama 后
@@ -121,7 +122,7 @@ ollama pull huihui_ai/dolphin3-abliterated
 
 ## 在线翻译配置文件
 
-当翻译后端选择 `openai` 或 `deepseek` 时，程序会读取：
+当翻译后端选择 `openai` / `deepseek` / `qwen` 时，程序会读取：
 
 - `config/translation.toml`
 
@@ -136,6 +137,11 @@ api_key = "..."
 [deepseek]
 base_url = "https://api.deepseek.com/v1"
 model = "deepseek-chat"
+api_key = "..."
+
+[qwen]
+base_url = "https://coding.dashscope.aliyuncs.com/v1"
+model = "qwen3-max-2026-01-23"
 api_key = "..."
 ```
 
@@ -180,6 +186,18 @@ export DEEPSEEK_API_KEY="your_api_key"
 subgen /path/video.mp4 \
   --translate-backend deepseek \
   --translate-model deepseek-chat
+```
+
+### 5) 可选：切换到 百炼Qwen 翻译后端
+
+```bash
+export DASHSCOPE_API_KEY="your_api_key"
+subgen /path/video.mp4 \
+  --translate-backend qwen \
+  --translate-model qwen3-max-2026-01-23
+
+# 说明：百炼 Coding Plan 的 API URL / API Key 与其他 Qwen 接入方式不同，
+# 建议优先使用 coding.dashscope.aliyuncs.com 这一套配置。
 ```
 
 ## 网页视频抓取下载（LLM 策略）
@@ -383,7 +401,7 @@ python -m pip install playwright
 
 GUI 设计复用了 `subgen` 的后端调用配置思路：
 
-- 后端固定为 `local/openai/deepseek`
+- 后端固定为 `local/openai/deepseek/qwen`
 - 默认模型与默认 Base URL 与 `subgen` 保持一致
 - 在线后端配置继续读取 `config/translation.toml`
 
@@ -400,15 +418,15 @@ subgen-gui
 - 拖拽视频文件到列表区域
 - 点击“添加文件/添加文件夹”导入视频
 - 输出目录选择后会在界面中显示当前目录
-- ASR 引擎下拉选择（`whisper` / `faster-whisper`）
+- ASR 引擎下拉选择（`whisper` / `faster-whisper` / `deepgram`）
 - Whisper 模型下拉会随 ASR 引擎自动变化
 - 若本机没有所选 Whisper 模型，首次运行会自动下载
-- 翻译后端可选 `local/openai/deepseek`，默认 `local`
+- 翻译后端可选 `local/openai/deepseek/qwen`，默认 `qwen`
 - 本地翻译模型下拉可选：`qwen2.5:7b`、`dolphin3:8b`、`huihui_ai/dolphin3-abliterated`
 - 本地翻译默认连接 `http://localhost:11434/v1`
 - OpenAI 默认连接 `https://api.openai.com/v1`
 - DeepSeek 默认连接 `https://api.deepseek.com/v1`
-- 在线后端（OpenAI/DeepSeek）会自动读取 `config/translation.toml`
+- 在线后端（OpenAI/DeepSeek/百炼Qwen）会自动读取 `config/translation.toml`
 - 启动后会显示 `Ollama 状态` 红绿提示，可手动“刷新检测”
 - 点击“开始处理”前会再次检测 Ollama，未就绪会阻止启动并提示原因
 - 一键开始处理并在日志区域查看进度

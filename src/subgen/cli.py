@@ -46,6 +46,11 @@ BACKEND_DEFAULTS = {
         "model": "deepseek-chat",
         "env_key": "DEEPSEEK_API_KEY",
     },
+    "qwen": {
+        "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "model": "qwen3-max-2026-01-23",
+        "env_key": "DASHSCOPE_API_KEY",
+    },
 }
 
 DEEPGRAM_ASR_MODELS = [
@@ -158,7 +163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--asr-engine",
         choices=["whisper", "faster-whisper", "deepgram"],
-        default="faster-whisper",
+        default="deepgram",
         help="ASR engine",
     )
     parser.add_argument(
@@ -168,7 +173,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--deepgram-model",
-        default="nova-3",
+        default="enhanced",
         help="Deepgram ASR model name (e.g., nova-3)",
     )
     parser.add_argument(
@@ -212,9 +217,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--translate-backend",
-        choices=["local", "openai", "deepseek"],
-        default="local",
-        help="Translation backend. local=Ollama, openai=OpenAI, deepseek=DeepSeek",
+        choices=["local", "openai", "deepseek", "qwen"],
+        default="qwen",
+        help="Translation backend. local=Ollama, openai=OpenAI, deepseek=DeepSeek, qwen=Alibaba Bailian",
     )
     parser.add_argument(
         "--translate-base-url",
@@ -256,7 +261,7 @@ def resolve_translation_settings(
     resolved_base_url = base_url or defaults["base_url"]
     resolved_api_key = api_key
 
-    if backend in {"openai", "deepseek"}:
+    if backend in {"openai", "deepseek", "qwen"}:
         cfg_path = (config_path or DEFAULT_TRANSLATE_CONFIG_PATH).expanduser().resolve()
         if not cfg_path.exists():
             raise RuntimeError(
@@ -314,7 +319,7 @@ def resolve_deepgram_settings(
     sec_model = str(sec.get("model") or "").strip() if isinstance(sec, dict) else ""
 
     key = (api_key or "").strip() or (os.getenv("DEEPGRAM_API_KEY") or "").strip() or sec_key
-    model = (model_name or "").strip() or sec_model or "nova-3"
+    model = (model_name or "").strip() or sec_model or "enhanced"
     return key, model
 
 
@@ -326,7 +331,7 @@ def save_deepgram_settings(
 ) -> Path:
     p = (config_path or DEFAULT_ASR_CONFIG_PATH).expanduser().resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
-    model = (model_name or "nova-3").strip() or "nova-3"
+    model = (model_name or "enhanced").strip() or "enhanced"
     key = (api_key or "").strip()
     body = (
         "[deepgram]\n"
@@ -1914,123 +1919,145 @@ def translate_fulltext_then_llm_refill(
     client = OpenAI(api_key=api_key, base_url=base_url)
     total_count = float(len(entries))
 
-    _emit_progress(
-        progress_callback,
-        task="translate",
-        current=0.0,
-        total=total_count,
-        label=progress_label,
-    )
-    source_plain_text = "\n".join(e.text for e in entries if (e.text or "").strip())
-    doc_prompt = (
-        "You are an expert subtitle translator.\n"
-        "Translate the following full source script into natural Simplified Chinese.\n"
-        "Return ONLY translated Chinese full text. Do not include JSON or explanations."
-    )
-    full_zh_text = _chat_completion_text(
-        client=client,
-        model_name=model_name,
-        messages=[
-            {"role": "system", "content": doc_prompt},
-            {"role": "user", "content": source_plain_text},
-        ],
-        base_url=base_url,
-        use_ollama_native_params=use_ollama_native_params,
-    ).strip()
-
-    _emit_progress(
-        progress_callback,
-        task="translate",
-        current=total_count,
-        total=total_count,
-        label=progress_label,
-    )
-    _emit_progress(
-        progress_callback,
-        task="align",
-        current=0.0,
-        total=total_count,
-        label=progress_label,
-    )
-
-    # Ask the model to perform ordered semantic refill by source timestamp lines.
-    batches = _build_token_limited_batches(entries, max_tokens=max(600, max_tokens))
-    output = [e.text for e in entries]
-    done = 0.0
-    for batch_start, batch_end in batches:
-        batch = entries[batch_start:batch_end]
-        refill_payload = {
-            "task": (
-                "Refill Chinese subtitle lines in order.\n"
-                "Given source lines with timestamps and full translated Chinese text,\n"
-                "find the closest semantic sentence(s) and assign concise zh to each source id.\n"
-                "Not strict 1:1 by punctuation; split/merge by context naturally, but keep order."
-            ),
-            "full_translated_chinese": full_zh_text,
-            "source_with_timestamps": [
-                {
-                    "id": i,
-                    "start": batch[i].start,
-                    "end": batch[i].end,
-                    "source": batch[i].text,
-                }
-                for i in range(len(batch))
-            ],
-            "output_schema": [{"id": 0, "zh": "..."}],
-            "constraints": [
-                "Return STRICT JSON array only.",
-                "Exactly one item for each id in current batch.",
-                "zh must be Simplified Chinese, concise subtitle style.",
-                "Do not leave English unless source is a proper noun/term.",
-            ],
-        }
-        refill_prompt = (
-            "You are a subtitle alignment editor.\n"
-            "Execute semantic matching and refill Chinese lines by source order and timing."
+    try:
+        _emit_progress(
+            progress_callback,
+            task="translate",
+            current=0.0,
+            total=total_count,
+            label=progress_label,
         )
-        refill_text = _chat_completion_text(
+        source_plain_text = "\n".join(e.text for e in entries if (e.text or "").strip())
+        doc_prompt = (
+            "You are an expert subtitle translator.\n"
+            "Translate the following full source script into natural Simplified Chinese.\n"
+            "Return ONLY translated Chinese full text. Do not include JSON or explanations."
+        )
+        full_zh_text = _chat_completion_text(
             client=client,
             model_name=model_name,
             messages=[
-                {"role": "system", "content": refill_prompt},
-                {"role": "user", "content": json.dumps(refill_payload, ensure_ascii=False)},
+                {"role": "system", "content": doc_prompt},
+                {"role": "user", "content": source_plain_text},
             ],
             base_url=base_url,
             use_ollama_native_params=use_ollama_native_params,
+        ).strip()
+
+        _emit_progress(
+            progress_callback,
+            task="translate",
+            current=total_count,
+            total=total_count,
+            label=progress_label,
         )
-        parsed = _parse_strict_json_array(refill_text)
-        batch_map = {
-            int(item["id"]): str(item["zh"]).strip()
-            for item in parsed
-            if "id" in item and "zh" in item
-        }
-        for i, e in enumerate(batch):
-            idx = batch_start + i
-            candidate = batch_map.get(i, "").strip()
-            if not candidate:
-                candidate = e.text
-            if _looks_like_untranslated(e.text, candidate):
-                candidate = _retry_translate_if_needed(
-                    client=client,
-                    model_name=model_name,
-                    source_text=e.text,
-                    current_text=candidate,
-                    prev_ctx=[x.text for x in batch[max(0, i - 2) : i]],
-                    next_ctx=[x.text for x in batch[i + 1 : i + 3]],
-                    base_url=base_url,
-                    use_ollama_native_params=use_ollama_native_params,
-                )
-            output[idx] = candidate or e.text
-            done += 1.0
         _emit_progress(
             progress_callback,
             task="align",
-            current=done,
+            current=0.0,
             total=total_count,
             label=progress_label,
         )
 
-    return output
+        # Ask the model to perform ordered semantic refill by source timestamp lines.
+        batches = _build_token_limited_batches(entries, max_tokens=max(600, max_tokens))
+        output = [e.text for e in entries]
+        done = 0.0
+        for batch_start, batch_end in batches:
+            batch = entries[batch_start:batch_end]
+            refill_payload = {
+                "task": (
+                    "Refill Chinese subtitle lines in order.\n"
+                    "Given source lines with timestamps and full translated Chinese text,\n"
+                    "find the closest semantic sentence(s) and assign concise zh to each source id.\n"
+                    "Not strict 1:1 by punctuation; split/merge by context naturally, but keep order."
+                ),
+                "full_translated_chinese": full_zh_text,
+                "source_with_timestamps": [
+                    {
+                        "id": i,
+                        "start": batch[i].start,
+                        "end": batch[i].end,
+                        "source": batch[i].text,
+                    }
+                    for i in range(len(batch))
+                ],
+                "output_schema": [{"id": 0, "zh": "..."}],
+                "constraints": [
+                    "Return STRICT JSON array only.",
+                    "Exactly one item for each id in current batch.",
+                    "zh must be Simplified Chinese, concise subtitle style.",
+                    "Do not leave English unless source is a proper noun/term.",
+                ],
+            }
+            refill_prompt = (
+                "You are a subtitle alignment editor.\n"
+                "Execute semantic matching and refill Chinese lines by source order and timing."
+            )
+            refill_text = _chat_completion_text(
+                client=client,
+                model_name=model_name,
+                messages=[
+                    {"role": "system", "content": refill_prompt},
+                    {"role": "user", "content": json.dumps(refill_payload, ensure_ascii=False)},
+                ],
+                base_url=base_url,
+                use_ollama_native_params=use_ollama_native_params,
+            )
+            parsed = _parse_strict_json_array(refill_text)
+            batch_map = {
+                int(item["id"]): str(item["zh"]).strip()
+                for item in parsed
+                if "id" in item and "zh" in item
+            }
+            for i, e in enumerate(batch):
+                idx = batch_start + i
+                candidate = batch_map.get(i, "").strip()
+                if not candidate:
+                    candidate = e.text
+                if _looks_like_untranslated(e.text, candidate):
+                    candidate = _retry_translate_if_needed(
+                        client=client,
+                        model_name=model_name,
+                        source_text=e.text,
+                        current_text=candidate,
+                        prev_ctx=[x.text for x in batch[max(0, i - 2) : i]],
+                        next_ctx=[x.text for x in batch[i + 1 : i + 3]],
+                        base_url=base_url,
+                        use_ollama_native_params=use_ollama_native_params,
+                    )
+                output[idx] = candidate or e.text
+                done += 1.0
+            _emit_progress(
+                progress_callback,
+                task="align",
+                current=done,
+                total=total_count,
+                label=progress_label,
+            )
+
+        return output
+    except Exception:
+        # Robust fallback for online backends like DeepSeek when full-text step fails.
+        line_zh = translate_entries_contextual(
+            entries,
+            model_name=model_name,
+            max_tokens=max_tokens,
+            base_url=base_url,
+            api_key=api_key,
+            progress_label=progress_label,
+            progress_callback=progress_callback,
+        )
+        return redistribute_translated_by_source_timestamps(
+            entries,
+            line_zh,
+            model_name=model_name,
+            base_url=base_url,
+            api_key=api_key,
+            max_tokens=max_tokens,
+            progress_label=progress_label,
+            progress_callback=progress_callback,
+        )
 
 
 def main() -> None:
