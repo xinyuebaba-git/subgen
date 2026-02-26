@@ -206,7 +206,7 @@ class App:
     def __init__(self, root: tk.Tk, dnd_enabled: bool, dnd_reason: str | None = None):
         self.root = root
         self.root.title("SubGen - 自动字幕生成")
-        self.root.geometry("980x680")
+        self.root.geometry("980x760")
         self.dnd_enabled = dnd_enabled
 
         self.files: list[Path] = []
@@ -246,7 +246,7 @@ class App:
         top.pack(fill=BOTH, expand=True)
 
         files_frame = ttk.LabelFrame(top, text="视频文件", padding=10)
-        files_frame.pack(fill=BOTH, expand=True)
+        files_frame.pack(fill="x")
 
         drop_text = "拖拽视频到此区域，或使用下方按钮添加"
         if not self.dnd_enabled:
@@ -259,7 +259,7 @@ class App:
         list_container = ttk.Frame(files_frame)
         list_container.pack(fill=BOTH, expand=True, pady=8)
 
-        self.file_listbox = tk.Listbox(list_container, height=8, selectmode=tk.EXTENDED)
+        self.file_listbox = tk.Listbox(list_container, height=5, selectmode=tk.EXTENDED)
         self.file_listbox.pack(side=LEFT, fill=BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(list_container, orient=VERTICAL, command=self.file_listbox.yview)
@@ -276,12 +276,17 @@ class App:
         ttk.Button(btn_row, text="移除选中", command=self._remove_selected).pack(side=LEFT)
         ttk.Button(btn_row, text="清空", command=self._clear_files).pack(side=LEFT, padx=8)
 
-        options = ttk.LabelFrame(top, text="参数", padding=10)
-        options.pack(fill=BOTH, pady=10)
+        options_row = ttk.Frame(top)
+        options_row.pack(fill="x", pady=10)
 
-        ttk.Label(options, text="输出目录").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=4)
+        asr_frame = ttk.LabelFrame(options_row, text="ASR与输出", padding=10)
+        asr_frame.pack(side=LEFT, fill="x", padx=(0, 10))
+        trans_frame = ttk.LabelFrame(options_row, text="翻译与服务", padding=10)
+        trans_frame.pack(side=LEFT, fill="x")
+
+        ttk.Label(asr_frame, text="输出目录").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=4)
         self.output_dir_entry = tk.Entry(
-            options,
+            asr_frame,
             state="disabled",
             relief="solid",
             borderwidth=1,
@@ -289,73 +294,79 @@ class App:
             fg="#ff3b30",
             disabledforeground="#ff3b30",
             insertbackground="#ff3b30",
+            width=42,
         )
         self.output_dir_entry.grid(row=0, column=1, sticky="ew", pady=4)
         self._render_output_dir(self.output_dir.get())
-        ttk.Button(options, text="浏览", command=self._pick_output_dir).grid(
+        ttk.Button(asr_frame, text="浏览", command=self._pick_output_dir).grid(
             row=0, column=2, padx=(8, 0), pady=4
         )
 
-        ttk.Label(options, text="ASR 引擎").grid(row=1, column=0, sticky=W, padx=(0, 8), pady=4)
+        ttk.Label(asr_frame, text="ASR 引擎").grid(row=1, column=0, sticky=W, padx=(0, 8), pady=4)
         ttk.Combobox(
-            options,
+            asr_frame,
             textvariable=self.asr_engine,
             values=["whisper", "faster-whisper", "deepgram"],
             state="readonly",
-        ).grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+            width=20,
+        ).grid(row=1, column=1, columnspan=2, sticky="w", pady=4)
 
-        ttk.Label(options, text="ASR 模型").grid(row=2, column=0, sticky=W, padx=(0, 8), pady=4)
+        ttk.Label(asr_frame, text="ASR 模型").grid(row=2, column=0, sticky=W, padx=(0, 8), pady=4)
         self.whisper_model_combo = ttk.Combobox(
-            options,
+            asr_frame,
             textvariable=self.whisper_model,
             values=MODEL_PRESETS_DEFAULT,
             state="normal",
+            width=20,
         )
-        self.whisper_model_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        self.whisper_model_combo.grid(row=2, column=1, columnspan=2, sticky="w", pady=4)
 
-        ttk.Label(options, text="Deepgram API Key").grid(row=3, column=0, sticky=W, padx=(0, 8), pady=4)
-        ttk.Entry(options, textvariable=self.deepgram_api_key, show="*").grid(
-            row=3, column=1, columnspan=2, sticky="ew", pady=4
+        ttk.Label(asr_frame, text="Deepgram API Key").grid(row=3, column=0, sticky=W, padx=(0, 8), pady=4)
+        ttk.Entry(asr_frame, textvariable=self.deepgram_api_key, show="*", width=28).grid(
+            row=3, column=1, columnspan=2, sticky="w", pady=4
         )
 
-        self._add_labeled_entry(options, "每条最大时长(秒)", self.max_duration, 4)
+        ttk.Label(asr_frame, text="每条最大时长(秒)").grid(row=4, column=0, sticky=W, padx=(0, 8), pady=4)
+        ttk.Entry(asr_frame, textvariable=self.max_duration, width=12).grid(row=4, column=1, sticky="w", pady=4)
 
-        trans_row = ttk.Frame(options)
-        trans_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=4)
-        ttk.Checkbutton(trans_row, text="翻译为简体中文", variable=self.translate_enabled).pack(side=LEFT)
-        ttk.Label(trans_row, text="后端").pack(side=LEFT, padx=(14, 6))
+        ttk.Checkbutton(trans_frame, text="翻译为简体中文", variable=self.translate_enabled).grid(
+            row=0, column=0, columnspan=2, sticky=W, pady=(0, 6)
+        )
+        ttk.Label(trans_frame, text="翻译后端").grid(row=1, column=0, sticky=W, padx=(0, 8), pady=4)
         self.translate_backend_combo = ttk.Combobox(
-            trans_row,
+            trans_frame,
             textvariable=self.translate_backend,
             values=["local", "openai", "deepseek"],
-            width=9,
+            width=18,
             state="readonly",
         )
-        self.translate_backend_combo.pack(side=LEFT)
+        self.translate_backend_combo.grid(row=1, column=1, sticky="w", pady=4)
         self.translate_backend_combo.bind("<<ComboboxSelected>>", self._on_translate_backend_change)
-        ttk.Label(trans_row, text="本地模型").pack(side=LEFT, padx=(12, 6))
+        ttk.Label(trans_frame, text="本地模型").grid(row=2, column=0, sticky=W, padx=(0, 8), pady=4)
         self.local_model_combo = ttk.Combobox(
-            trans_row,
+            trans_frame,
             textvariable=self.translate_model,
             values=LOCAL_TRANSLATION_MODELS,
-            width=28,
+            width=30,
             state="readonly",
         )
-        self.local_model_combo.pack(side=LEFT)
+        self.local_model_combo.grid(row=2, column=1, sticky="w", pady=4)
         self.local_model_combo.bind("<<ComboboxSelected>>", self._on_local_model_change)
-        ttk.Label(trans_row, text="最大Token数").pack(side=LEFT, padx=(12, 6))
-        ttk.Entry(trans_row, textvariable=self.translate_max_tokens, width=10).pack(side=LEFT)
+        ttk.Label(trans_frame, text="最大Token数").grid(row=3, column=0, sticky=W, padx=(0, 8), pady=4)
+        ttk.Entry(trans_frame, textvariable=self.translate_max_tokens, width=12).grid(
+            row=3, column=1, sticky="w", pady=4
+        )
         ttk.Label(
-            trans_row,
+            trans_frame,
             textvariable=self.max_tokens_hint,
             foreground="#7aa2f7",
-        ).pack(side=LEFT, padx=(10, 0))
-        ttk.Label(options, text=f"在线后端配置文件: {DEFAULT_TRANSLATE_CONFIG_PATH}").grid(
-            row=6, column=0, columnspan=3, sticky=W, pady=(2, 4)
+        ).grid(row=4, column=0, columnspan=2, sticky=W, pady=(2, 4))
+        ttk.Label(trans_frame, text=f"在线后端配置文件: {DEFAULT_TRANSLATE_CONFIG_PATH}").grid(
+            row=5, column=0, columnspan=2, sticky=W, pady=(0, 4)
         )
-        ttk.Label(options, text="Ollama 状态").grid(row=7, column=0, sticky=W, padx=(0, 8), pady=4)
-        status_row = ttk.Frame(options)
-        status_row.grid(row=7, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(trans_frame, text="Ollama 状态").grid(row=6, column=0, sticky=W, padx=(0, 8), pady=4)
+        status_row = ttk.Frame(trans_frame)
+        status_row.grid(row=6, column=1, sticky="ew", pady=4)
         self.ollama_status_label = tk.Label(
             status_row,
             textvariable=self.ollama_status_text,
@@ -365,15 +376,16 @@ class App:
         self.ollama_status_label.pack(side=LEFT, fill=BOTH, expand=True)
         ttk.Button(status_row, text="刷新检测", command=self._refresh_ollama_status_async).pack(side=RIGHT)
 
-        options.columnconfigure(1, weight=1)
+        asr_frame.columnconfigure(1, weight=1)
+        trans_frame.columnconfigure(1, weight=1)
 
         run_row = ttk.Frame(top)
-        run_row.pack(fill=BOTH)
+        run_row.pack(fill="x")
         self.run_btn = ttk.Button(run_row, text="开始处理", command=self._start)
         self.run_btn.pack(side=LEFT)
 
         progress_frame = ttk.LabelFrame(top, text="任务进度", padding=10)
-        progress_frame.pack(fill=BOTH, pady=(10, 0))
+        progress_frame.pack(fill="x", pady=(10, 0))
         ttk.Label(progress_frame, textvariable=self.current_file_text).grid(
             row=0, column=0, columnspan=2, sticky=W, pady=(0, 6)
         )
@@ -404,7 +416,7 @@ class App:
         log_frame = ttk.LabelFrame(top, text="日志", padding=10)
         log_frame.pack(fill=BOTH, expand=True, pady=10)
 
-        self.log_text = tk.Text(log_frame, height=12, state=tk.DISABLED)
+        self.log_text = tk.Text(log_frame, height=18, state=tk.DISABLED)
         self.log_text.pack(fill=BOTH, expand=True)
         self._refresh_asr_model_choices()
         self._refresh_local_model_widget()
