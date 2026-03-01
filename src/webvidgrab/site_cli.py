@@ -15,11 +15,86 @@ from typing import Callable
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+try:
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+    Console = None
+    Progress = None
+
 DEFAULT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+class RichProgressHandler:
+    """使用 rich 库显示下载进度"""
+    
+    def __init__(self, console: Console | None = None):
+        self.console = console or Console()
+        self.progress: Progress | None = None
+        self.task_id: int | None = None
+        self.current_file: str = "初始化中..."
+        self.downloaded: int = 0
+        self.total: int | None = None
+        
+    def start(self, description: str = "下载中") -> None:
+        """启动进度条"""
+        if not RICH_AVAILABLE:
+            return
+        self.progress = Progress(
+            TextColumn("[bold blue]{task.description}"),
+            SpinnerColumn(),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.1f}%"),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            TextColumn("•"),
+            TextColumn("[green]{task.fields[filename]}"),
+            console=self.console,
+            transient=False,
+        )
+        self.progress.start()
+        self.task_id = self.progress.add_task(
+            description,
+            total=None,  # 未知总大小
+            filename=self.current_file,
+        )
+        
+    def update(self, downloaded: int, total: int | None = None, filename: str | None = None) -> None:
+        """更新进度"""
+        if not RICH_AVAILABLE or self.progress is None or self.task_id is None:
+            return
+        if filename:
+            self.current_file = filename[:50]  # 限制长度
+        if total and total != self.total:
+            self.total = total
+            self.progress.update(self.task_id, total=total)
+        self.downloaded = downloaded
+        self.progress.update(self.task_id, completed=downloaded, filename=self.current_file)
+        
+    def set_filename(self, filename: str) -> None:
+        """设置当前文件名"""
+        if filename:
+            self.current_file = filename[:50]
+            if RICH_AVAILABLE and self.progress and self.task_id:
+                self.progress.update(self.task_id, filename=self.current_file)
+                
+    def stop(self, success: bool = True) -> None:
+        """停止进度条"""
+        if RICH_AVAILABLE and self.progress:
+            self.progress.stop()
+            self.progress = None
+            self.task_id = None
+            if success:
+                self.console.print("[bold green]✓ 下载完成![/bold green]")
+            else:
+                self.console.print("[bold red]✗ 下载失败[/bold red]")
 
 
 @dataclass
@@ -696,6 +771,7 @@ def run_site_download(
     use_runtime_capture: bool = True,
     log_func: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
+    use_rich_progress: bool = True,
 ) -> ProbeResult:
     log_lines: list[str] = []
     log_file = Path.cwd() / "logs" / "sitegrab" / f"sitegrab-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
@@ -706,12 +782,27 @@ def run_site_download(
         if log_func:
             log_func(msg)
 
+    # 初始化 rich 进度条
+    rich_handler = None
+    if RICH_AVAILABLE and use_rich_progress:
+        rich_handler = RichProgressHandler()
+        
+    def rich_progress_callback(downloaded: int, total: int | None = None) -> None:
+        """rich 进度回调"""
+        if rich_handler:
+            rich_handler.update(downloaded, total)
+
     output: Path | None = None
     download_target: str | None = None
     all_candidates: list[str] = []
     try:
         log(f"[url] {page_url}")
         log(f"[browser] {browser}:{profile or '(default)'}")
+        
+        # 显示探测进度
+        if rich_handler:
+            rich_handler.start("探测视频中...")
+            
         html = _fetch_text(page_url, referer=page_url)
         page_title = _extract_page_title(html)
         log(f"[page-title] {page_title or '(none)'}")
@@ -720,6 +811,8 @@ def run_site_download(
         log(f"[html-candidates] {len(html_candidates)}")
         runtime_candidates: list[str] = []
         if use_runtime_capture:
+            if rich_handler:
+                rich_handler.set_filename(f"捕获中... ({capture_seconds}s)")
             runtime_candidates = _capture_runtime_candidates(
                 url=page_url,
                 browser=browser,
@@ -743,26 +836,43 @@ def run_site_download(
 
         download_target = best_url or page_url
         log(f"[selected-url] {download_target}")
+        
+        # 开始下载
+        if rich_handler:
+            rich_handler.start("下载视频中...")
+            if page_title:
+                rich_handler.set_filename(page_title)
+            
         output = _download_with_ytdlp(
             target_url=download_target,
             page_url=page_url,
             output_dir=output_dir,
             preferred_title=page_title,
             log_lines=log_lines,
-            progress_callback=progress_callback,
+            progress_callback=rich_progress_callback if rich_handler else progress_callback,
         )
+        
+        if rich_handler:
+            rich_handler.stop(success=output is not None)
+            
         if output is None and download_target != page_url:
-            log("[fallback] 选中切片流失败，回退下载页面URL。")
+            log("[fallback] 选中切片流失败，回退下载页面 URL。")
+            if rich_handler:
+                rich_handler.start("回退下载中...")
             output = _download_with_ytdlp(
                 target_url=page_url,
                 page_url=page_url,
                 output_dir=output_dir,
                 preferred_title=page_title,
                 log_lines=log_lines,
-                progress_callback=progress_callback,
+                progress_callback=rich_progress_callback if rich_handler else progress_callback,
             )
+            if rich_handler:
+                rich_handler.stop(success=output is not None)
     except Exception as exc:
         log(f"[fatal] {exc}")
+        if rich_handler:
+            rich_handler.stop(success=False)
     finally:
         log_file.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
 
@@ -800,6 +910,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Maximum number of concurrent download workers (default: 3)",
+    )
+    p.add_argument(
+        "--no-rich",
+        action="store_true",
+        help="Disable rich progress bar (use plain text output)",
     )
     return p.parse_args()
 
@@ -841,6 +956,7 @@ def _download_single_url(
     use_runtime_capture: bool,
     idx: int,
     total: int,
+    use_rich: bool = True,
 ) -> BatchDownloadResult:
     """单个 URL 下载任务（用于线程池）"""
     print(f"[task] {idx}/{total} {url}")
@@ -853,6 +969,7 @@ def _download_single_url(
             capture_seconds=max(10, int(capture_seconds)),
             use_runtime_capture=use_runtime_capture,
             log_func=print,
+            use_rich_progress=use_rich,
         )
         print(f"[log] {result.log_file}")
         if result.ok and result.output_file:
@@ -873,6 +990,7 @@ async def download_batch_async(
     capture_seconds: int = 30,
     use_runtime_capture: bool = True,
     max_workers: int = 3,
+    use_rich: bool = True,
 ) -> tuple[list[BatchDownloadResult], int, int]:
     """
     异步批量下载多个 URL
@@ -885,6 +1003,7 @@ async def download_batch_async(
         capture_seconds: 捕获时长（秒）
         use_runtime_capture: 是否使用运行时捕获
         max_workers: 最大并发数
+        use_rich: 是否使用 rich 进度条
         
     Returns:
         (results, success_count, failed_count)
@@ -907,6 +1026,7 @@ async def download_batch_async(
                 use_runtime_capture,
                 idx,
                 len(urls),
+                use_rich,
             )
             futures.append(future)
         
@@ -938,10 +1058,13 @@ def main() -> int:
         return 1
 
     out_dir = args.output_dir.expanduser().resolve()
+    use_rich = RICH_AVAILABLE and not args.no_rich
     
     # 支持并发下载模式
     if args.concurrent and len(urls) > 1:
         print(f"[mode] 并发下载模式 (max_workers={args.max_workers})")
+        if not use_rich:
+            print("[note] rich 进度条已禁用")
         results, success, failed = asyncio.run(
             download_batch_async(
                 urls=urls,
@@ -968,6 +1091,7 @@ def main() -> int:
                 use_runtime_capture=not args.no_runtime_capture,
                 idx=idx,
                 total=len(urls),
+                use_rich=use_rich,
             )
             results.append(task_result)
             if task_result.result and task_result.result.ok:
