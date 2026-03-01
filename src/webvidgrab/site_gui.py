@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import webbrowser
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ from tkinter import BOTH, END, LEFT, W, filedialog, messagebox, ttk
 import tkinter as tk
 
 from webvidgrab.site_cli import ProbeResult, run_site_download
+from webvidgrab.version import get_version_info, check_for_updates
 
 
 @dataclass
@@ -24,7 +26,8 @@ class DownloadTask:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("PSiteDL")
+        self.version_info = get_version_info()
+        self.root.title(f"PSiteDL v{self.version_info['version']}")
         self.root.geometry("1180x820")
 
         self.output_dir = tk.StringVar(value=str((Path.home() / "Downloads").resolve()))
@@ -47,6 +50,9 @@ class App:
         self._poll_logs()
 
     def _build_ui(self) -> None:
+        # 创建菜单栏
+        self._create_menu()
+        
         top = ttk.Frame(self.root, padding=12)
         top.pack(fill=BOTH, expand=True)
 
@@ -372,6 +378,133 @@ class App:
         except queue.Empty:
             pass
         self.root.after(120, self._poll_logs)
+
+    def _create_menu(self) -> None:
+        """创建菜单栏"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # 帮助菜单
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="关于 PSiteDL", command=self._show_about)
+        help_menu.add_command(label="检查更新", command=self._check_updates)
+        help_menu.add_separator()
+        help_menu.add_command(label="打开项目目录", command=self._open_project_dir)
+        
+        # 工具菜单
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="工具", menu=tools_menu)
+        tools_menu.add_command(label="更新到最新版本", command=self._update_to_latest)
+        
+        # 状态栏显示版本
+        self.statusbar = ttk.Label(
+            self.root,
+            text=f"PSiteDL v{self.version_info['display']}",
+            relief=tk.SUNKEN,
+            anchor=W,
+            padding=(5, 2),
+        )
+        self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def _show_about(self) -> None:
+        """显示关于对话框"""
+        about_text = f"""PSiteDL - 网页视频下载工具
+
+版本：{self.version_info['display']}
+分支：{self.version_info['branch'] or 'N/A'}
+Commit: {self.version_info['commit'] or 'N/A'}
+
+功能:
+• 网页视频流探测与下载
+• 支持多浏览器 Cookie 自动捕获
+• 并发下载支持
+• 实时进度显示
+
+© 2026"""
+        messagebox.showinfo("关于 PSiteDL", about_text)
+
+    def _check_updates(self) -> None:
+        """检查更新"""
+        self.status_text.set("正在检查更新...")
+        self.root.update()
+        
+        result = check_for_updates()
+        
+        if "error" in result:
+            messagebox.showwarning("检查更新", f"检查失败：{result['error']}")
+            self.status_text.set("就绪")
+            return
+        
+        if result["has_update"]:
+            changes_text = "\n".join(f"• {c}" for c in result["changes"][:10])
+            msg = f"""发现新版本！
+
+当前版本：{result['current_version']}
+最新版本：{result['latest_version']}
+
+更新内容:
+{changes_text}
+
+是否现在更新？"""
+            if messagebox.askyesno("发现新版本", msg):
+                self._update_to_latest()
+        else:
+            messagebox.showinfo("检查更新", f"已是最新版本：{result['current_version']}")
+        
+        self.status_text.set("就绪")
+
+    def _update_to_latest(self) -> None:
+        """更新到最新版本"""
+        try:
+            from pathlib import Path
+            import subprocess
+            
+            project_root = Path(__file__).parent.parent.parent
+            
+            # 拉取最新代码
+            self.status_text.set("正在更新...")
+            self.root.update()
+            
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                # 重新安装依赖
+                subprocess.run(
+                    ["git", "submodule", "update", "--init", "--recursive"],
+                    cwd=project_root,
+                    capture_output=True,
+                    timeout=30
+                )
+                
+                msg = f"更新成功！\n\n{result.stdout[:500]}"
+                msg += "\n\n需要重启 GUI 以应用更新。是否现在重启？"
+                if messagebox.askyesno("更新完成", msg):
+                    self.root.quit()
+                    # 重启 GUI
+                    import sys
+                    import os
+                    os.execv(sys.executable, [sys.executable, "-m", "webvidgrab.site_gui"])
+            else:
+                messagebox.showerror("更新失败", f"错误：{result.stderr}")
+                self.status_text.set("就绪")
+        except Exception as e:
+            messagebox.showerror("更新失败", str(e))
+            self.status_text.set("就绪")
+
+    def _open_project_dir(self) -> None:
+        """打开项目目录"""
+        try:
+            project_root = Path(__file__).parent.parent.parent
+            webbrowser.open(f"file://{project_root}")
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开目录：{e}")
 
 
 def main() -> int:
