@@ -8,6 +8,7 @@
 | ✅ Step 2 | 添加单元测试 - 为核心函数编写测试 | 已完成 | v2.1-tests |
 | ✅ Step 3 | 实现异步下载 - 支持并发下载多个视频 | 已完成 | v2.2-async |
 | ✅ Step 4 | 添加进度显示 - 使用 rich 库显示下载进度 | 已完成 | v2.3-rich |
+| ✅ Step 5 | GUI 版本号显示 + 更新检查 + 一键启动 | 已完成 | v2.4-gui |
 
 ---
 
@@ -125,6 +126,27 @@ pip install pytest rich
 
 ---
 
+## 🎯 Step 5: GUI 版本号显示 + 更新检查
+
+**完成内容：**
+- 新增 `version.py` 模块管理版本信息
+- GUI 标题栏显示版本号
+- GUI 状态栏显示完整版本信息
+- 新增「帮助」菜单：关于、检查更新、打开项目目录
+- 新增「工具」菜单：更新到最新版本
+- 桌面启动脚本自动检查更新
+
+**使用示例：**
+```bash
+# 桌面一键启动（带更新检查）
+# 双击 /Users/yr001/Desktop/启动 PSiteDL.command
+
+# 或直接运行启动脚本
+./scripts/launch_psitedl.sh
+```
+
+---
+
 ## 🚀 快速开始
 
 ```bash
@@ -141,6 +163,12 @@ python -m webvidgrab.site_cli https://example.com/video
 
 # 批量并发下载
 python -m webvidgrab.site_cli --url-file urls.txt --concurrent --max-workers 3
+
+# GUI 启动（带版本显示）
+python -m webvidgrab.site_gui
+
+# 桌面一键启动（推荐）
+# 双击 /Users/yr001/Desktop/启动 PSiteDL.command
 ```
 
 ---
@@ -153,6 +181,7 @@ python -m webvidgrab.site_cli --url-file urls.txt --concurrent --max-workers 3
 | v2.1-tests | 2026-03-01 | 单元测试覆盖完成（25 个用例） |
 | v2.2-async | 2026-03-01 | 异步并发下载支持 |
 | v2.3-rich | 2026-03-01 | Rich 进度条显示 |
+| v2.4-gui | 2026-03-01 | GUI 版本号显示 + 更新检查 + 一键启动 |
 
 ---
 
@@ -160,8 +189,9 @@ python -m webvidgrab.site_cli --url-file urls.txt --concurrent --max-workers 3
 
 ✅ **代码质量提升**：模块化设计 + 单元测试覆盖
 ✅ **性能提升**：并发下载支持，多 URL 场景 3-5 倍加速
-✅ **用户体验提升**：实时进度显示，清晰直观的下载状态
+✅ **用户体验提升**：实时进度显示 + 版本信息 + 自动更新
 ✅ **可维护性提升**：清晰的代码结构，完善的测试覆盖
+✅ **版本管理完善**：GUI 显示版本 + 自动检查更新 + 一键更新
 
 ---
 
