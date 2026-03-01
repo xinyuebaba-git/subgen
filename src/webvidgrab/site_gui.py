@@ -257,9 +257,12 @@ class App:
         def progress(downloaded: int, total: int | None) -> None:
             # 同时发送进度更新和日志消息
             self.log_queue.put(("__PROGRESS__", (tid, downloaded, total)))
+            # 每次进度变化都记录日志（便于调试）
             if total:
                 percent = (downloaded / total * 100) if total > 0 else 0
-                self.log_queue.put(("__TASK_LOG__", (tid, f"进度：{downloaded}/{total} ({percent:.1f}%)")))
+                self.log_queue.put(("__TASK_LOG__", (tid, f"📊 进度：{downloaded}/{total} ({percent:.1f}%)")))
+            else:
+                self.log_queue.put(("__TASK_LOG__", (tid, f"📊 进度：{downloaded}/?")))
 
         return run_site_download(
             page_url=task.url,

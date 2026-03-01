@@ -675,6 +675,10 @@ def _download_with_ytdlp(
         "after_move:filepath",
         target_url,
     ]
+    
+    # 调试：记录完整命令
+    if progress_callback:
+        log_lines.append(f"[debug] 启动下载，progress_callback 已注册")
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     lines: list[str] = []
@@ -704,6 +708,7 @@ def _download_with_ytdlp(
                     downloaded = new_downloaded
                     total = new_total
                     if progress_callback:
+                        log_lines.append(f"[debug] [site-progress] 进度更新：{downloaded}/{total}")
                         progress_callback(downloaded, total)
 
             m_total = re.search(r"total fragments:\s*(\d+)", cleaned) or re.search(
@@ -714,6 +719,7 @@ def _download_with_ytdlp(
                 if new_total != total:
                     total = new_total
                     if progress_callback:
+                        log_lines.append(f"[debug] [total] 进度更新：{downloaded}/{total}")
                         progress_callback(downloaded, total)
 
             m_frag = (
@@ -728,6 +734,7 @@ def _download_with_ytdlp(
                     downloaded = new_downloaded
                     total = new_total
                     if progress_callback:
+                        log_lines.append(f"[debug] [frag] 进度更新：{downloaded}/{total}")
                         progress_callback(downloaded, total)
 
             p = Path(line.strip()).expanduser()
