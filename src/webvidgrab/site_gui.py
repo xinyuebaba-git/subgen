@@ -255,7 +255,11 @@ class App:
             self.log_queue.put(("__TASK_LOG__", (tid, msg)))
 
         def progress(downloaded: int, total: int | None) -> None:
+            # 同时发送进度更新和日志消息
             self.log_queue.put(("__PROGRESS__", (tid, downloaded, total)))
+            if total:
+                percent = (downloaded / total * 100) if total > 0 else 0
+                self.log_queue.put(("__TASK_LOG__", (tid, f"进度：{downloaded}/{total} ({percent:.1f}%)")))
 
         return run_site_download(
             page_url=task.url,
@@ -397,10 +401,11 @@ class App:
         menubar.add_cascade(label="工具", menu=tools_menu)
         tools_menu.add_command(label="更新到最新版本", command=self._update_to_latest)
         
-        # 状态栏显示版本
+        # 状态栏显示版本（完整信息）
+        version_text = f"PSiteDL {self.version_info['display']} | 分支：{self.version_info['branch'] or 'N/A'}"
         self.statusbar = ttk.Label(
             self.root,
-            text=f"PSiteDL v{self.version_info['display']}",
+            text=version_text,
             relief=tk.SUNKEN,
             anchor=W,
             padding=(5, 2),
