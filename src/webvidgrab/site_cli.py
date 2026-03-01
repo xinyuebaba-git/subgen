@@ -4,6 +4,7 @@ import argparse
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -107,13 +108,13 @@ def _export_browser_cookies(
     profile: str,
     log: Callable[[str], None],
 ) -> Path | None:
-    ytdlp = shutil.which("yt-dlp")
-    if not ytdlp:
+    ytdlp_cmd = _resolve_ytdlp_cmd(log=log)
+    if not ytdlp_cmd:
         return None
     out = Path(tempfile.gettempdir()) / f"sitegrab-cookies-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
     browser_arg = f"{browser}:{profile}" if profile else browser
     cmd = [
-        ytdlp,
+        *ytdlp_cmd,
         "--cookies-from-browser",
         browser_arg,
         "--cookies",
@@ -126,6 +127,44 @@ def _export_browser_cookies(
     if proc.returncode == 0 and out.exists():
         log(f"[runtime-capture] 已导出浏览器cookie: {out}")
         return out
+    return None
+
+
+def _resolve_ytdlp_cmd(log: Callable[[str], None] | None = None) -> list[str] | None:
+    exe = shutil.which("yt-dlp")
+    if exe:
+        return [exe]
+
+    # Prefer current interpreter's module to avoid PATH issues when app is launched
+    # with python -m ... from a venv without activation.
+    check = subprocess.run(
+        [sys.executable, "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('yt_dlp') else 1)"]
+    )
+    if check.returncode == 0:
+        return [sys.executable, "-m", "yt_dlp"]
+
+    if log:
+        log("[deps] 未检测到 yt-dlp，尝试自动安装到当前 Python 环境...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except Exception as exc:
+        if log:
+            log(f"[deps] yt-dlp 自动安装失败: {exc}")
+        return None
+
+    check2 = subprocess.run(
+        [sys.executable, "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('yt_dlp') else 1)"]
+    )
+    if check2.returncode == 0:
+        if log:
+            log("[deps] yt-dlp 已自动安装。")
+        return [sys.executable, "-m", "yt_dlp"]
     return None
 
 
@@ -166,60 +205,217 @@ def _auto_confirm_age_gate(page, log: Callable[[str], None], quiet: bool = False
     selectors = [
         "button:has-text('我已年满18岁')",
         "button:has-text('我已滿18歲')",
+        "button:has-text('我满18')",
+        "button:has-text('我滿18')",
         "button:has-text('年满18')",
         "button:has-text('滿18')",
         "button:has-text('18+')",
         "button:has-text('I am 18')",
+        "button:has-text('I am over 18')",
         "button:has-text('Over 18')",
+        "button:has-text('Yes')",
         "button:has-text('Continue')",
         "button:has-text('Enter')",
         "button:has-text('Agree')",
+        "button:has-text('Proceed')",
         "a:has-text('18+')",
+        "a:has-text('I am 18')",
         "a:has-text('Continue')",
         "a:has-text('Enter')",
         "a:has-text('进入')",
         "a:has-text('進入')",
         "[role='button']:has-text('18+')",
         "[role='button']:has-text('Continue')",
+        "[role='button']:has-text('Enter')",
+        "[data-testid*='age']",
+        "[id*='age']",
+        "[class*='age']",
         "input[type='submit'][value*='18']",
         "input[type='button'][value*='18']",
+        "input[type='submit'][value*='Enter']",
+        "input[type='button'][value*='Enter']",
     ]
-    hit = False
-    frames = [page] + list(page.frames)
-    for frame in frames:
-        for sel in selectors:
-            try:
-                loc = frame.locator(sel).first
-                if loc and loc.is_visible(timeout=250):
-                    loc.click(timeout=1000)
-                    hit = True
-            except Exception:
+
+    def _frames():
+        # page.frames already includes main frame; keep dedup by url/name to avoid repeated work.
+        seen: set[tuple[str, str]] = set()
+        result = []
+        for fr in list(page.frames):
+            key = (str(getattr(fr, "url", "") or ""), str(getattr(fr, "name", "") or ""))
+            if key in seen:
                 continue
+            seen.add(key)
+            result.append(fr)
+        return result
+
+    def _click_locator(frame, sel: str) -> str:
         try:
-            clicked = frame.evaluate(
-                """() => {
-                    const tokens = ['18+','年满18','滿18','over 18','i am 18','continue','enter','agree','进入','進入'];
-                    const nodes = Array.from(document.querySelectorAll('button,a,[role="button"],div,span,input[type="button"],input[type="submit"]'));
-                    const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-                    for (const el of nodes) {
-                        const text = norm(el.innerText || el.textContent || el.value || '');
-                        if (!text || !tokens.some(t => text.includes(t))) continue;
-                        const st = window.getComputedStyle(el);
-                        const visible = st && st.display !== 'none' && st.visibility !== 'hidden' && el.offsetParent !== null;
-                        if (!visible) continue;
-                        try { el.click(); return text.slice(0, 60); } catch (_) {}
-                    }
-                    return '';
-                }"""
-            )
-            if isinstance(clicked, str) and clicked.strip():
-                hit = True
+            loc = frame.locator(sel).first
+            if not loc or not loc.is_visible(timeout=200):
+                return ""
+            text = (loc.inner_text(timeout=200) or "").strip()
+            try:
+                loc.click(timeout=900)
+            except Exception:
+                try:
+                    loc.click(timeout=900, force=True)
+                except Exception:
+                    return ""
+            return text or sel
+        except Exception:
+            return ""
+
+    def _js_scan_and_click(frame) -> str:
+        try:
+            return str(
+                frame.evaluate(
+                    """() => {
+                        const tokens = [
+                          '18+','年满18','滿18','over 18','i am 18','i am over 18','adult',
+                          'continue','enter','agree','yes','proceed','进入','進入','同意'
+                        ];
+                        const attrTokens = ['age','adult','confirm','enter','agree','yes18'];
+                        const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                        const visible = (el) => {
+                          if (!el) return false;
+                          const st = window.getComputedStyle(el);
+                          if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+                          const r = el.getBoundingClientRect();
+                          return r.width > 2 && r.height > 2;
+                        };
+                        const scoreEl = (el) => {
+                          const text = norm(el.innerText || el.textContent || el.value || '');
+                          const attrs = norm(
+                            [el.id, el.className, el.getAttribute?.('name'), el.getAttribute?.('aria-label'), el.getAttribute?.('data-testid')]
+                              .filter(Boolean).join(' ')
+                          );
+                          let s = 0;
+                          if (tokens.some(t => text.includes(t))) s += 4;
+                          if (attrTokens.some(t => attrs.includes(t))) s += 3;
+                          if (/button|submit/i.test(el.type || '')) s += 1;
+                          return { s, text };
+                        };
+                        const all = Array.from(document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"],div,span'));
+                        let best = null;
+                        for (const el of all) {
+                          if (!visible(el)) continue;
+                          const { s, text } = scoreEl(el);
+                          if (s < 3) continue;
+                          if (!best || s > best.s) best = { el, s, text };
+                        }
+                        if (!best) return '';
+                        try { best.el.click(); return best.text || 'matched-by-attr'; } catch (_) {}
+                        try {
+                          best.el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                          return best.text || 'matched-by-event';
+                        } catch (_) {}
+                        return '';
+                    }"""
+                )
+            ).strip()
+        except Exception:
+            return ""
+
+    def _shadow_scan_click(page_obj) -> str:
+        # Some sites render age gate in shadow root; scan recursively in main document.
+        try:
+            return str(
+                page_obj.evaluate(
+                    """() => {
+                        const tokens = ['18+','年满18','滿18','over 18','i am 18','continue','enter','agree','进入','進入'];
+                        const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                        const visible = (el) => {
+                          if (!el) return false;
+                          const st = window.getComputedStyle(el);
+                          if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+                          const r = el.getBoundingClientRect();
+                          return r.width > 2 && r.height > 2;
+                        };
+                        const walk = (root, out) => {
+                          if (!root) return;
+                          const nodes = root.querySelectorAll?.('*') || [];
+                          for (const el of nodes) {
+                            out.push(el);
+                            if (el.shadowRoot) walk(el.shadowRoot, out);
+                          }
+                        };
+                        const all = [];
+                        walk(document, all);
+                        for (const el of all) {
+                          if (!visible(el)) continue;
+                          const text = norm(el.innerText || el.textContent || el.value || '');
+                          if (!text || !tokens.some(t => text.includes(t))) continue;
+                          try { el.click(); return text.slice(0, 80); } catch (_) {}
+                        }
+                        return '';
+                    }"""
+                )
+            ).strip()
+        except Exception:
+            return ""
+
+    hit = False
+    for round_idx in range(1, 9):
+        clicked_any = False
+        for frame in _frames():
+            for sel in selectors:
+                clicked = _click_locator(frame, sel)
+                if clicked:
+                    clicked_any = True
+                    if not quiet:
+                        log(f"[runtime-capture] 年龄确认命中(selector): {clicked[:80]}")
+            clicked_js = _js_scan_and_click(frame)
+            if clicked_js:
+                clicked_any = True
                 if not quiet:
-                    log(f"[runtime-capture] 自动点击年龄确认: {clicked.strip()}")
+                    log(f"[runtime-capture] 年龄确认命中(js): {clicked_js[:80]}")
+
+        clicked_shadow = _shadow_scan_click(page)
+        if clicked_shadow:
+            clicked_any = True
+            if not quiet:
+                log(f"[runtime-capture] 年龄确认命中(shadow): {clicked_shadow[:80]}")
+
+        if clicked_any:
+            hit = True
+            try:
+                page.wait_for_timeout(350)
+            except Exception:
+                pass
+            # If an interstitial form submits, navigation may happen slightly later.
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=1500)
+            except Exception:
+                pass
+        else:
+            # No hit in this round, wait for delayed-render dialog and retry.
+            try:
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+
+        # Early stop if real video element is visible and not paused by overlay.
+        try:
+            has_video = bool(
+                page.evaluate(
+                    """() => {
+                        const v = document.querySelector('video');
+                        if (!v) return false;
+                        const r = v.getBoundingClientRect();
+                        return r.width > 8 && r.height > 8;
+                    }"""
+                )
+            )
+            if has_video and hit:
+                break
         except Exception:
             pass
+
+        if not quiet and round_idx == 8 and not hit:
+            log("[runtime-capture] 未检测到年龄确认按钮（可能文案/结构特殊或在验证码页）。")
+
     if hit and not quiet:
-        log("[runtime-capture] 已自动处理年龄确认弹层。")
+        log("[runtime-capture] 已自动处理年龄确认流程。")
 
 
 def _capture_runtime_candidates(
@@ -317,10 +513,10 @@ def _capture_runtime_candidates(
 
 
 def _probe_height(url: str, referer: str, log_lines: list[str]) -> int:
-    ytdlp = shutil.which("yt-dlp")
-    if not ytdlp:
+    ytdlp_cmd = _resolve_ytdlp_cmd()
+    if not ytdlp_cmd:
         return 0
-    cmd = [ytdlp, "--add-header", f"Referer:{referer}", "--add-header", f"User-Agent:{DEFAULT_UA}", "--list-formats", url]
+    cmd = [*ytdlp_cmd, "--add-header", f"Referer:{referer}", "--add-header", f"User-Agent:{DEFAULT_UA}", "--list-formats", url]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log_lines.append(f"[probe-candidate] {url}")
     log_lines.append(f"[probe-candidate-exit] {proc.returncode}")
@@ -375,14 +571,14 @@ def _download_with_ytdlp(
     log_lines: list[str],
     progress_callback: Callable[[int, int | None], None] | None = None,
 ) -> Path | None:
-    ytdlp = shutil.which("yt-dlp")
-    if not ytdlp:
+    ytdlp_cmd = _resolve_ytdlp_cmd()
+    if not ytdlp_cmd:
         raise RuntimeError("未找到 yt-dlp。请先安装：python -m pip install -U yt-dlp")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     existing_names = {p.name for p in output_dir.glob("*") if p.is_file()}
     cmd = [
-        ytdlp,
+        *ytdlp_cmd,
         "--no-playlist",
         "--newline",
         "--progress",
@@ -580,7 +776,13 @@ def run_site_download(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Probe and download segmented video from webpage.")
-    p.add_argument("url", help="Webpage playback URL")
+    p.add_argument("url", nargs="?", help="Webpage playback URL")
+    p.add_argument(
+        "--url-file",
+        type=Path,
+        default=None,
+        help="Text file containing one or more playback URLs (one per line)",
+    )
     p.add_argument("--output-dir", type=Path, default=Path.home() / "Downloads")
     p.add_argument("--browser", default="chrome", choices=["chrome", "chromium", "edge", "brave"])
     p.add_argument("--profile", default="Default")
@@ -589,23 +791,62 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _load_urls_from_file(path: Path) -> list[str]:
+    p = path.expanduser().resolve()
+    if not p.exists():
+        raise RuntimeError(f"url-file not found: {p}")
+    urls: list[str] = []
+    for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # support inline comments: URL ... # comment
+        if "#" in line:
+            line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith(("http://", "https://")):
+            urls.append(line)
+    # de-dup while preserving order
+    return list(dict.fromkeys(urls))
+
+
 def main() -> int:
     args = parse_args()
-    result = run_site_download(
-        page_url=args.url,
-        output_dir=args.output_dir.expanduser().resolve(),
-        browser=args.browser,
-        profile=args.profile,
-        capture_seconds=max(10, int(args.capture_seconds)),
-        use_runtime_capture=not args.no_runtime_capture,
-        log_func=print,
-    )
-    print(f"[log] {result.log_file}")
-    if result.ok and result.output_file:
-        print(f"[saved] {result.output_file}")
-        return 0
-    print("[error] 未下载到视频。请查看日志。")
-    return 1
+    urls: list[str] = []
+    if args.url:
+        urls.append(args.url)
+    if args.url_file:
+        urls.extend(_load_urls_from_file(args.url_file))
+    urls = list(dict.fromkeys(urls))
+    if not urls:
+        print("[error] 请提供 URL 或 --url-file。")
+        return 1
+
+    out_dir = args.output_dir.expanduser().resolve()
+    success = 0
+    failed = 0
+    for idx, url in enumerate(urls, start=1):
+        print(f"[task] {idx}/{len(urls)} {url}")
+        result = run_site_download(
+            page_url=url,
+            output_dir=out_dir,
+            browser=args.browser,
+            profile=args.profile,
+            capture_seconds=max(10, int(args.capture_seconds)),
+            use_runtime_capture=not args.no_runtime_capture,
+            log_func=print,
+        )
+        print(f"[log] {result.log_file}")
+        if result.ok and result.output_file:
+            print(f"[saved] {result.output_file}")
+            success += 1
+        else:
+            print("[error] 未下载到视频。请查看日志。")
+            failed += 1
+
+    print(f"[summary] total={len(urls)} success={success} failed={failed}")
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":

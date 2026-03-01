@@ -1,0 +1,3 @@
+[deepgram]
+model = "enhanced"
+api_key = "5623769b4269cd74a971dd76f768113e05f6c416"

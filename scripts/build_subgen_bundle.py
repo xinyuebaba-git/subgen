@@ -327,9 +327,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--asr-engine",
-        choices=["faster-whisper", "whisper"],
+        choices=["faster-whisper", "whisper", "deepgram"],
         default="faster-whisper",
-        help="ASR engine whose model cache should be packed",
+        help="ASR engine whose runtime deps/config should be packed",
     )
     parser.add_argument(
         "--asr-model",
@@ -422,13 +422,19 @@ def main() -> None:
                 wheels_dir=(wheels_dir if wheels_dir.exists() else None),
                 model_offline_only=args.model_offline_only,
             )
-        else:
+        elif args.asr_engine == "whisper":
             model_info = collect_openai_whisper_model(
                 args.asr_model,
                 model_cache_dir,
                 bundle_dir=bundle_dir,
                 wheels_dir=(wheels_dir if wheels_dir.exists() else None),
                 model_offline_only=args.model_offline_only,
+            )
+        else:
+            # Deepgram is online ASR; no local model artifacts are required.
+            print(
+                "[INFO] asr-engine=deepgram: skip local model cache export "
+                "(online ASR, runtime key required)."
             )
 
     deploy_script_src = REPO_ROOT / "scripts" / "deploy_subgen_bundle.py"

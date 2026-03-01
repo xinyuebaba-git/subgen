@@ -25,7 +25,7 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("PSiteDL")
-        self.root.geometry("1120x760")
+        self.root.geometry("1180x820")
 
         self.output_dir = tk.StringVar(value=str((Path.home() / "Downloads").resolve()))
         self.browser = tk.StringVar(value="chrome")
@@ -54,7 +54,7 @@ class App:
         form.pack(fill=BOTH)
 
         ttk.Label(form, text="网页播放URL（每行一个）").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=4)
-        self.url_text = tk.Text(form, height=5)
+        self.url_text = tk.Text(form, height=3)
         self.url_text.grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
 
         ttk.Label(form, text="输出目录").grid(row=1, column=0, sticky=W, padx=(0, 8), pady=4)
@@ -97,23 +97,35 @@ class App:
         self.start_btn.pack(side=LEFT, padx=(8, 0))
         self.clear_pending_btn = ttk.Button(ctrl, text="清空待下载", command=self._clear_pending)
         self.clear_pending_btn.pack(side=LEFT, padx=(8, 0))
+        ttk.Button(ctrl, text="清空日志", command=self._clear_log).pack(side=LEFT, padx=(8, 0))
         ttk.Label(ctrl, textvariable=self.status_text).pack(side=LEFT, padx=(12, 0))
 
-        list_frame = ttk.Frame(top)
-        list_frame.pack(fill=BOTH, expand=True, pady=(10, 0))
+        split = ttk.Panedwindow(top, orient=tk.VERTICAL)
+        split.pack(fill=BOTH, expand=True, pady=(10, 0))
 
-        pending_frame = ttk.LabelFrame(list_frame, text="待下载任务", padding=8)
-        pending_frame.pack(fill=BOTH, expand=False)
-        self.pending_list = tk.Listbox(pending_frame, height=7)
+        list_frame = ttk.Frame(split)
+        split.add(list_frame, weight=3)
+        log_frame = ttk.LabelFrame(split, text="运行日志", padding=10)
+        split.add(log_frame, weight=2)
+
+        task_tabs = ttk.Notebook(list_frame)
+        task_tabs.pack(fill=BOTH, expand=True)
+
+        pending_tab = ttk.Frame(task_tabs, padding=8)
+        active_tab = ttk.Frame(task_tabs, padding=8)
+        completed_tab = ttk.Frame(task_tabs, padding=8)
+        task_tabs.add(pending_tab, text="待下载任务")
+        task_tabs.add(active_tab, text="正在下载任务")
+        task_tabs.add(completed_tab, text="已完成任务")
+
+        self.pending_list = tk.Listbox(pending_tab, height=12)
         self.pending_list.pack(fill=BOTH, expand=True)
 
-        active_frame = ttk.LabelFrame(list_frame, text="正在下载任务", padding=8)
-        active_frame.pack(fill=BOTH, expand=False, pady=(8, 0))
         self.active_tree = ttk.Treeview(
-            active_frame,
+            active_tab,
             columns=("url", "progress", "status"),
             show="headings",
-            height=8,
+            height=12,
         )
         self.active_tree.heading("url", text="URL")
         self.active_tree.heading("progress", text="切片进度")
@@ -123,15 +135,16 @@ class App:
         self.active_tree.column("status", width=160, anchor=W)
         self.active_tree.pack(fill=BOTH, expand=True)
 
-        completed_frame = ttk.LabelFrame(list_frame, text="已完成任务", padding=8)
-        completed_frame.pack(fill=BOTH, expand=False, pady=(8, 0))
-        self.completed_list = tk.Listbox(completed_frame, height=7)
+        self.completed_list = tk.Listbox(completed_tab, height=12)
         self.completed_list.pack(fill=BOTH, expand=True)
 
-        log_frame = ttk.LabelFrame(top, text="运行日志", padding=10)
-        log_frame.pack(fill=BOTH, expand=True, pady=(10, 0))
-        self.log_text = tk.Text(log_frame, state=tk.DISABLED)
+        self.log_text = tk.Text(log_frame, state=tk.DISABLED, height=14)
         self.log_text.pack(fill=BOTH, expand=True)
+
+    def _clear_log(self) -> None:
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete("1.0", END)
+        self.log_text.config(state=tk.DISABLED)
 
     def _pick_output_dir(self) -> None:
         p = filedialog.askdirectory(title="选择输出目录")

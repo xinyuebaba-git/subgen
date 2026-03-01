@@ -6,10 +6,8 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from datetime import datetime
 from pathlib import Path
-
 
 _LOG_LINES: list[str] = []
 _LOG_PATH: Path | None = None
@@ -48,12 +46,11 @@ def run_with_fallback(
     except subprocess.CalledProcessError:
         if mode == "offline":
             raise
-        print(f"[WARN] Offline {step_name} failed, fallback to online install.")
+        _emit(f"[WARN] Offline {step_name} failed, fallback to online install.")
         run(online_cmd)
 
 
 def parse_requires_python(req: str) -> tuple[int, int]:
-    # Supports ">=3.10" format.
     if not req.startswith(">="):
         return (3, 10)
     ver = req[2:].strip()
@@ -77,7 +74,6 @@ def ensure_venv(venv_dir: Path) -> Path:
     python_bin = venv_dir / "bin" / "python"
     if python_bin.exists():
         return python_bin
-
     run([sys.executable, "-m", "venv", str(venv_dir)])
     return python_bin
 
@@ -133,73 +129,19 @@ def install_python_stack(
     run_with_fallback(proj_offline, proj_online, mode=mode, step_name="project install")
 
 
-def restore_model_cache(bundle_dir: Path, manifest: dict, dry_run: bool = False) -> None:
-    asr = manifest.get("asr", {})
-    model_cache = asr.get("model_cache")
-    if not model_cache:
-        _emit("[INFO] No model cache in bundle manifest, skip restoring model cache.")
-        return
-
-    cache_kind = model_cache.get("cache_kind")
-    rel = model_cache.get("cache_rel_path")
-    if not rel:
-        _emit("[WARN] Invalid model cache metadata, skip model restore.")
-        return
-
-    src = bundle_dir / "model-cache" / rel
-    if not src.exists():
-        _emit(f"[WARN] model-cache path missing: {src}")
-        return
-
-    if cache_kind == "huggingface_repo":
-        target = Path.home() / ".cache" / "huggingface" / "hub" / src.name
-        if dry_run:
-            _emit(f"[DRY-RUN] copytree {src} -> {target}")
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src, target, dirs_exist_ok=True)
-        _emit(f"[OK] restored faster-whisper cache: {target}")
-        return
-
-    if cache_kind == "whisper_pt":
-        target = Path.home() / ".cache" / "whisper" / src.name
-        if dry_run:
-            _emit(f"[DRY-RUN] copy2 {src} -> {target}")
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, target)
-        _emit(f"[OK] restored openai-whisper cache: {target}")
-        return
-
-    if cache_kind == "local_path":
-        target = Path.home() / ".cache" / "subgen" / "models" / src.name
-        if dry_run:
-            _emit(f"[DRY-RUN] copytree {src} -> {target}")
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src, target, dirs_exist_ok=True)
-        _emit(f"[OK] restored local ASR model path: {target}")
-        return
-
-    _emit(f"[WARN] unsupported cache kind: {cache_kind}")
-
-
 def detect_ffmpeg(auto_install: bool) -> bool:
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin:
         _emit(f"[OK] ffmpeg found: {ffmpeg_bin}")
         return True
-
     _emit("[WARN] ffmpeg not found.")
     if not auto_install:
         return False
 
-    # Best-effort auto install; continue even if failed.
     install_cmds: list[list[str]] = []
     if shutil.which("brew"):
         install_cmds.append(["brew", "install", "ffmpeg"])
     is_root = hasattr(os, "geteuid") and os.geteuid() == 0
-
     if shutil.which("apt-get"):
         if is_root:
             install_cmds.append(["apt-get", "update"])
@@ -221,148 +163,91 @@ def detect_ffmpeg(auto_install: bool) -> bool:
                 return True
         except Exception:
             continue
-
-    _emit("[WARN] ffmpeg auto-install failed; install it manually if ASR decode fails.")
+    _emit("[WARN] ffmpeg auto-install failed; install it manually for m3u8 merge.")
     return False
 
 
-def _is_valid_key(value: str | None) -> bool:
-    if value is None:
-        return False
-    v = value.strip()
-    if not v:
-        return False
-    low = v.lower()
-    if "your_" in low or "replace_me" in low or "xxxx" in low:
-        return False
-    return True
+def ensure_python_module(python_bin: Path, module_name: str, pip_name: str, mode: str, wheels_dir: Path) -> bool:
+    check = subprocess.run(
+        [str(python_bin), "-c", f"import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('{module_name}') else 1)"]
+    )
+    if check.returncode == 0:
+        _emit(f"[OK] python module ready: {module_name}")
+        return True
 
-
-def _load_toml(path: Path) -> dict:
-    if not path.exists():
-        return {}
+    _emit(f"[WARN] missing python module: {module_name}, trying auto-install...")
+    online_cmd = [str(python_bin), "-m", "pip", "install", "-U", pip_name]
+    offline_cmd = [
+        str(python_bin),
+        "-m",
+        "pip",
+        "install",
+        "--no-index",
+        "--find-links",
+        str(wheels_dir),
+        "-U",
+        pip_name,
+    ]
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        run_with_fallback(offline_cmd, online_cmd, mode=mode, step_name=f"install {pip_name}")
+    except Exception as exc:
+        _emit(f"[WARN] auto-install failed for {pip_name}: {exc}")
+        return False
+
+    check2 = subprocess.run(
+        [str(python_bin), "-c", f"import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('{module_name}') else 1)"]
+    )
+    if check2.returncode == 0:
+        _emit(f"[OK] auto-installed module: {module_name}")
+        return True
+    _emit(f"[WARN] module still missing after install: {module_name}")
+    return False
 
 
-def _ensure_runtime_config_templates(project_dir: Path) -> None:
-    cfg_dir = project_dir / "config"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-
-    translation = cfg_dir / "translation.toml"
-    if not translation.exists():
-        translation.write_text(
-            (
-                "[openai]\n"
-                'base_url = "https://api.openai.com/v1"\n'
-                'model = "gpt-4.1-mini"\n'
-                'api_key = ""\n\n'
-                "[deepseek]\n"
-                'base_url = "https://api.deepseek.com/v1"\n'
-                'model = "deepseek-chat"\n'
-                'api_key = ""\n\n'
-                "[qwen]\n"
-                'base_url = "https://coding.dashscope.aliyuncs.com/v1"\n'
-                'model = "qwen3-max-2026-01-23"\n'
-                'api_key = ""\n'
-            ),
-            encoding="utf-8",
-        )
-        _emit(f"[OK] created config template: {translation}")
-
-    asr_cfg = cfg_dir / "asr.toml"
-    if not asr_cfg.exists():
-        asr_cfg.write_text(
-            (
-                "[deepgram]\n"
-                'model = "enhanced"\n'
-                'api_key = ""\n'
-            ),
-            encoding="utf-8",
-        )
-        _emit(f"[OK] created config template: {asr_cfg}")
-
-    env_file = project_dir / ".env.subgen"
+def ensure_runtime_templates(project_dir: Path) -> None:
+    env_file = project_dir / ".env.psitedl"
     if not env_file.exists():
         env_file.write_text(
             (
-                "# Optional runtime env for subgen launchers\n"
-                "export OPENAI_API_KEY=\"\"\n"
-                "export DEEPSEEK_API_KEY=\"\"\n"
-                "export DASHSCOPE_API_KEY=\"\"\n"
-                "export DEEPGRAM_API_KEY=\"\"\n"
+                "# Optional runtime env for PSiteDL launchers\n"
+                "export HTTP_PROXY=\"\"\n"
+                "export HTTPS_PROXY=\"\"\n"
             ),
             encoding="utf-8",
         )
         _emit(f"[OK] created env template: {env_file}")
 
 
-def check_runtime_requirements(project_dir: Path) -> None:
-    _emit("\n[CHECK] runtime configuration and environment")
-    _ensure_runtime_config_templates(project_dir)
-
-    tcfg = _load_toml(project_dir / "config" / "translation.toml")
-    acfg = _load_toml(project_dir / "config" / "asr.toml")
-
-    providers = [
-        ("openai", "OPENAI_API_KEY"),
-        ("deepseek", "DEEPSEEK_API_KEY"),
-        ("qwen", "DASHSCOPE_API_KEY"),
-    ]
-    for section, env_key in providers:
-        sec = tcfg.get(section, {}) if isinstance(tcfg, dict) else {}
-        cfg_key = str(sec.get("api_key") or "").strip() if isinstance(sec, dict) else ""
-        env_val = os.getenv(env_key, "")
-        if _is_valid_key(env_val) or _is_valid_key(cfg_key):
-            src = env_key if _is_valid_key(env_val) else f"config/translation.toml[{section}]"
-            _emit(f"[OK] {section} api_key ready ({src})")
-        else:
-            _emit(
-                f"[WARN] {section} api_key missing. Set {env_key} or config/translation.toml [{section}].api_key"
-            )
-
-    deepgram_sec = acfg.get("deepgram", {}) if isinstance(acfg, dict) else {}
-    deepgram_cfg_key = (
-        str(deepgram_sec.get("api_key") or "").strip() if isinstance(deepgram_sec, dict) else ""
-    )
-    deepgram_env = os.getenv("DEEPGRAM_API_KEY", "")
-    if _is_valid_key(deepgram_env) or _is_valid_key(deepgram_cfg_key):
-        src = "DEEPGRAM_API_KEY" if _is_valid_key(deepgram_env) else "config/asr.toml[deepgram]"
-        _emit(f"[OK] deepgram api_key ready ({src})")
-    else:
-        _emit("[WARN] deepgram api_key missing. Set DEEPGRAM_API_KEY or config/asr.toml [deepgram].api_key")
-
-    ff = shutil.which("ffprobe")
-    if ff:
-        _emit(f"[OK] ffprobe found: {ff}")
+def check_runtime_requirements(python_bin: Path, project_dir: Path, mode: str, wheels_dir: Path) -> None:
+    _emit("\n[CHECK] runtime requirements")
+    ensure_runtime_templates(project_dir)
+    ensure_python_module(python_bin, "yt_dlp", "yt-dlp", mode=mode, wheels_dir=wheels_dir)
+    ensure_python_module(python_bin, "playwright", "playwright", mode=mode, wheels_dir=wheels_dir)
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        _emit(f"[OK] ffprobe found: {ffprobe}")
     else:
         _emit("[WARN] ffprobe not found. ffmpeg package usually provides it.")
 
 
-def write_launchers(bundle_dir: Path, venv_dir: Path, manifest: dict) -> None:
-    asr = manifest.get("asr", {})
-    engine = str(asr.get("engine") or "faster-whisper")
-    model = str(asr.get("model") or "medium")
-
-    cli = bundle_dir / "run_subgen.sh"
-    gui = bundle_dir / "run_subgen_gui.sh"
+def write_launchers(bundle_dir: Path, venv_dir: Path) -> None:
+    cli = bundle_dir / "run_psitedl.sh"
+    gui = bundle_dir / "run_psitedl_gui.sh"
 
     cli.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         f'VENV="{venv_dir}"\n'
         f'PROJ="{bundle_dir / "project"}"\n'
-        'if [ -f "$PROJ/.env.subgen" ]; then\n'
+        'if [ -f "$PROJ/.env.psitedl" ]; then\n'
         "  # shellcheck disable=SC1090\n"
-        '  source "$PROJ/.env.subgen"\n'
+        '  source "$PROJ/.env.psitedl"\n'
         "fi\n"
-        "if [ ! -x \"$VENV/bin/subgen\" ]; then\n"
-        "  echo 'subgen command not found in venv, please rerun deploy script.'\n"
+        "if [ ! -x \"$VENV/bin/psitedl\" ]; then\n"
+        "  echo 'psitedl command not found in venv, please rerun deploy script.'\n"
         "  exit 1\n"
         "fi\n"
-        f'exec "$VENV/bin/subgen" --asr-engine {engine} --whisper-model "{model}" "$@"\n',
+        'exec "$VENV/bin/psitedl" "$@"\n',
         encoding="utf-8",
     )
     gui.write_text(
@@ -370,15 +255,15 @@ def write_launchers(bundle_dir: Path, venv_dir: Path, manifest: dict) -> None:
         "set -euo pipefail\n"
         f'VENV="{venv_dir}"\n'
         f'PROJ="{bundle_dir / "project"}"\n'
-        'if [ -f "$PROJ/.env.subgen" ]; then\n'
+        'if [ -f "$PROJ/.env.psitedl" ]; then\n'
         "  # shellcheck disable=SC1090\n"
-        '  source "$PROJ/.env.subgen"\n'
+        '  source "$PROJ/.env.psitedl"\n'
         "fi\n"
-        "if [ ! -x \"$VENV/bin/subgen-gui\" ]; then\n"
-        "  echo 'subgen-gui command not found in venv, please rerun deploy script.'\n"
+        "if [ ! -x \"$VENV/bin/psitedl-gui\" ]; then\n"
+        "  echo 'psitedl-gui command not found in venv, please rerun deploy script.'\n"
         "  exit 1\n"
         "fi\n"
-        "exec \"$VENV/bin/subgen-gui\"\n",
+        'exec "$VENV/bin/psitedl-gui"\n',
         encoding="utf-8",
     )
     cli.chmod(0o755)
@@ -387,7 +272,7 @@ def write_launchers(bundle_dir: Path, venv_dir: Path, manifest: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Deploy a portable SubGen bundle on a target machine."
+        description="Deploy a portable PSiteDL bundle on a target machine."
     )
     parser.add_argument(
         "--bundle-dir",
@@ -406,11 +291,6 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "offline", "online"],
         default="auto",
         help="Install mode: auto=offline first then online fallback",
-    )
-    parser.add_argument(
-        "--skip-model-restore",
-        action="store_true",
-        help="Skip restoring bundled ASR model cache",
     )
     parser.add_argument(
         "--no-auto-ffmpeg",
@@ -441,10 +321,7 @@ def main() -> None:
         raise SystemExit(f"project dir not found: {project_dir}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    required_python = (
-        manifest.get("project", {}).get("requires_python")
-        or ">=3.10"
-    )
+    required_python = manifest.get("project", {}).get("requires_python") or ">=3.10"
     ensure_python_version(required_python)
 
     try:
@@ -452,9 +329,6 @@ def main() -> None:
 
         if args.dry_run:
             _emit("[DRY-RUN] Skip venv/dependency installation.")
-            if not args.skip_model_restore:
-                restore_model_cache(bundle_dir, manifest, dry_run=True)
-            check_runtime_requirements(project_dir)
             return
 
         venv_dir = (
@@ -483,16 +357,18 @@ def main() -> None:
             project_dir=project_dir,
         )
 
-        if not args.skip_model_restore:
-            restore_model_cache(bundle_dir, manifest)
-
-        check_runtime_requirements(project_dir)
-        write_launchers(bundle_dir, venv_dir, manifest)
+        check_runtime_requirements(
+            python_bin=python_bin,
+            project_dir=project_dir,
+            mode=install_mode,
+            wheels_dir=wheels_dir,
+        )
+        write_launchers(bundle_dir, venv_dir)
 
         _emit("\nDeploy completed.")
         _emit(f"- venv: {venv_dir}")
-        _emit(f"- CLI launcher: {bundle_dir / 'run_subgen.sh'}")
-        _emit(f"- GUI launcher: {bundle_dir / 'run_subgen_gui.sh'}")
+        _emit(f"- CLI launcher: {bundle_dir / 'run_psitedl.sh'}")
+        _emit(f"- GUI launcher: {bundle_dir / 'run_psitedl_gui.sh'}")
     finally:
         _write_log_file()
         if _LOG_PATH is not None:
@@ -501,3 +377,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

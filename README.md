@@ -45,6 +45,14 @@ python3 scripts/build_subgen_bundle.py \
   --asr-model large-v3
 ```
 
+示例（打包 `deepgram` 在线 ASR 运行包）：
+
+```bash
+python3 scripts/build_subgen_bundle.py \
+  --asr-engine deepgram \
+  --asr-model enhanced
+```
+
 打包结果：
 
 - `dist/subgen-bundle-.../`：部署目录（含源码、wheels、模型缓存、部署脚本）
@@ -65,6 +73,8 @@ python3 deploy_subgen_bundle.py --bundle-dir .
 - 虚拟环境创建（`./.venv`）
 - 依赖安装：优先离线 `wheels`，失败自动回退在线安装
 - 恢复 ASR 模型缓存（`faster-whisper` 或 `whisper`）
+- 运行时配置体检（翻译/ASR API key、`ffprobe`）
+- 若缺少配置文件会自动生成模板：`project/config/translation.toml`、`project/config/asr.toml`、`project/.env.subgen`
 - 生成启动脚本：`run_subgen.sh`、`run_subgen_gui.sh`
 
 ### 3) 运行
@@ -80,6 +90,12 @@ python3 deploy_subgen_bundle.py --bundle-dir .
 - 强制在线安装：`python3 deploy_subgen_bundle.py --bundle-dir . --mode online`
 - 禁止自动安装 ffmpeg：`python3 deploy_subgen_bundle.py --bundle-dir . --no-auto-ffmpeg`
 - 打包时模型仅离线缓存（缺失立即失败）：`python3 scripts/build_subgen_bundle.py --asr-engine faster-whisper --asr-model medium --model-offline-only`
+
+部署日志：
+
+- 每次部署都会写日志：`<bundle-dir>/deploy-logs/deploy-YYYYMMDD-HHMMSS.log`
+- 控制台也会输出日志路径（`[LOG] ...`）
+- 自动修复失败（如 ffmpeg 安装失败）会在日志中保留详细告警，便于排障
 
 ## ASR 引擎与模型
 
@@ -351,6 +367,17 @@ psitedl "https://example.com/video-page" \
   --capture-seconds 30
 ```
 
+从文本文件批量读取 URL（每行一个，支持 `#` 注释）：
+
+```bash
+psitedl \
+  --url-file "/absolute/path/to/urls.txt" \
+  --output-dir "/absolute/path/to/downloads" \
+  --browser chrome \
+  --profile Default \
+  --capture-seconds 45
+```
+
 GUI 运行：
 
 ```bash
@@ -363,6 +390,7 @@ psitedl-gui
 
 命令行参数：
 - `url`：网页播放页 URL（必填）
+- `--url-file`：文本文件批量 URL 输入（可与单个 `url` 同时使用）
 - `--output-dir`：输出目录（默认 `~/Downloads`）
 - `--browser`：`chrome|chromium|edge|brave`
 - `--profile`：浏览器 profile（默认 `Default`）
@@ -375,9 +403,11 @@ psitedl-gui
 - 无论成功失败，都会输出 `[log] /abs/path/to/sitegrab-*.log`
 
 标准输出关键标记（建议 Agent 解析）：
+- `[task] i/n <url>`：当前任务
 - `[saved]`：最终下载文件绝对路径
 - `[log]`：运行日志路径
 - `[error]`：失败提示
+- `[summary] total=.. success=.. failed=..`：批量汇总
 
 日志关键字段（`logs/sitegrab/sitegrab-*.log`）：
 - `[url]`、`[browser]`、`[page-title]`
@@ -391,6 +421,44 @@ AI Agent 调用建议（稳定模式）：
 3. 执行后先读进程退出码，再解析 stdout 的 `[saved]` 与 `[log]`
 4. 若退出码非 0，读取 `[log]` 文件并定位 `[fatal]`、`[download-exit]`、`[selected-url]`
 5. 同一 URL 重试时可提高 `--capture-seconds`（如 `45`）
+
+### PSiteDL 跨机器打包部署（Mac 推荐）
+
+1) 在当前机器打包：
+
+```bash
+python3 scripts/build_psitedl_bundle.py
+```
+
+产物：
+- `dist/psitedl-bundle-.../`
+- `dist/psitedl-bundle-....tar.gz`
+
+2) 在目标机器部署：
+
+```bash
+python3 deploy_psitedl_bundle.py --bundle-dir .
+```
+
+部署脚本会自动执行：
+- Python 版本检测（`>=3.10`）
+- `ffmpeg` 检测（可尝试自动安装）
+- 创建虚拟环境并安装依赖（离线优先，失败自动回退在线）
+- 检测并自动补装 `yt-dlp` / `playwright`
+- 生成启动脚本：`run_psitedl.sh`、`run_psitedl_gui.sh`
+- 写入部署日志：`deploy-logs/deploy-YYYYMMDD-HHMMSS.log`
+
+3) 运行：
+
+```bash
+./run_psitedl.sh --url-file /absolute/path/PDL.txt
+./run_psitedl_gui.sh
+```
+
+可选参数：
+- 完全离线安装：`python3 deploy_psitedl_bundle.py --bundle-dir . --mode offline`
+- 强制在线安装：`python3 deploy_psitedl_bundle.py --bundle-dir . --mode online`
+- 禁止自动安装 ffmpeg：`python3 deploy_psitedl_bundle.py --bundle-dir . --no-auto-ffmpeg`
 
 精简版支持“自动抓取Token”按钮（会打开受控 Chrome 监听页面请求），
 若本机未安装 Playwright，请先执行：
