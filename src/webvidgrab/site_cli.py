@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -788,6 +790,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile", default="Default")
     p.add_argument("--capture-seconds", type=int, default=30)
     p.add_argument("--no-runtime-capture", action="store_true")
+    p.add_argument(
+        "--concurrent",
+        action="store_true",
+        help="Enable concurrent download mode for multiple URLs",
+    )
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=3,
+        help="Maximum number of concurrent download workers (default: 3)",
+    )
     return p.parse_args()
 
 
@@ -811,6 +824,107 @@ def _load_urls_from_file(path: Path) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+@dataclass
+class BatchDownloadResult:
+    """批量下载结果"""
+    url: str
+    result: ProbeResult | None
+    error: str | None = None
+
+
+def _download_single_url(
+    url: str,
+    out_dir: Path,
+    browser: str,
+    profile: str,
+    capture_seconds: int,
+    use_runtime_capture: bool,
+    idx: int,
+    total: int,
+) -> BatchDownloadResult:
+    """单个 URL 下载任务（用于线程池）"""
+    print(f"[task] {idx}/{total} {url}")
+    try:
+        result = run_site_download(
+            page_url=url,
+            output_dir=out_dir,
+            browser=browser,
+            profile=profile,
+            capture_seconds=max(10, int(capture_seconds)),
+            use_runtime_capture=use_runtime_capture,
+            log_func=print,
+        )
+        print(f"[log] {result.log_file}")
+        if result.ok and result.output_file:
+            print(f"[saved] {result.output_file}")
+        else:
+            print("[error] 未下载到视频。请查看日志。")
+        return BatchDownloadResult(url=url, result=result)
+    except Exception as e:
+        print(f"[error] {url}: {e}")
+        return BatchDownloadResult(url=url, result=None, error=str(e))
+
+
+async def download_batch_async(
+    urls: list[str],
+    output_dir: Path,
+    browser: str = "chrome",
+    profile: str = "Default",
+    capture_seconds: int = 30,
+    use_runtime_capture: bool = True,
+    max_workers: int = 3,
+) -> tuple[list[BatchDownloadResult], int, int]:
+    """
+    异步批量下载多个 URL
+    
+    Args:
+        urls: URL 列表
+        output_dir: 输出目录
+        browser: 浏览器类型
+        profile: 浏览器配置文件
+        capture_seconds: 捕获时长（秒）
+        use_runtime_capture: 是否使用运行时捕获
+        max_workers: 最大并发数
+        
+    Returns:
+        (results, success_count, failed_count)
+    """
+    loop = asyncio.get_event_loop()
+    results: list[BatchDownloadResult] = []
+    
+    # 使用线程池执行阻塞的下载任务
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for idx, url in enumerate(urls, start=1):
+            future = loop.run_in_executor(
+                executor,
+                _download_single_url,
+                url,
+                output_dir,
+                browser,
+                profile,
+                capture_seconds,
+                use_runtime_capture,
+                idx,
+                len(urls),
+            )
+            futures.append(future)
+        
+        # 等待所有任务完成
+        for future in asyncio.as_completed(futures):
+            result = await future
+            results.append(result)
+    
+    # 按原始 URL 顺序排序
+    url_order = {url: i for i, url in enumerate(urls)}
+    results.sort(key=lambda r: url_order.get(r.url, 999))
+    
+    success = sum(1 for r in results if r.result and r.result.ok)
+    failed = len(results) - success
+    
+    return results, success, failed
+
+
 def main() -> int:
     args = parse_args()
     urls: list[str] = []
@@ -824,26 +938,42 @@ def main() -> int:
         return 1
 
     out_dir = args.output_dir.expanduser().resolve()
-    success = 0
-    failed = 0
-    for idx, url in enumerate(urls, start=1):
-        print(f"[task] {idx}/{len(urls)} {url}")
-        result = run_site_download(
-            page_url=url,
-            output_dir=out_dir,
-            browser=args.browser,
-            profile=args.profile,
-            capture_seconds=max(10, int(args.capture_seconds)),
-            use_runtime_capture=not args.no_runtime_capture,
-            log_func=print,
+    
+    # 支持并发下载模式
+    if args.concurrent and len(urls) > 1:
+        print(f"[mode] 并发下载模式 (max_workers={args.max_workers})")
+        results, success, failed = asyncio.run(
+            download_batch_async(
+                urls=urls,
+                output_dir=out_dir,
+                browser=args.browser,
+                profile=args.profile,
+                capture_seconds=max(10, int(args.capture_seconds)),
+                use_runtime_capture=not args.no_runtime_capture,
+                max_workers=args.max_workers,
+            )
         )
-        print(f"[log] {result.log_file}")
-        if result.ok and result.output_file:
-            print(f"[saved] {result.output_file}")
-            success += 1
-        else:
-            print("[error] 未下载到视频。请查看日志。")
-            failed += 1
+    else:
+        # 顺序下载模式
+        results = []
+        success = 0
+        failed = 0
+        for idx, url in enumerate(urls, start=1):
+            task_result = _download_single_url(
+                url=url,
+                out_dir=out_dir,
+                browser=args.browser,
+                profile=args.profile,
+                capture_seconds=max(10, int(args.capture_seconds)),
+                use_runtime_capture=not args.no_runtime_capture,
+                idx=idx,
+                total=len(urls),
+            )
+            results.append(task_result)
+            if task_result.result and task_result.result.ok:
+                success += 1
+            else:
+                failed += 1
 
     print(f"[summary] total={len(urls)} success={success} failed={failed}")
     return 0 if failed == 0 else 1
