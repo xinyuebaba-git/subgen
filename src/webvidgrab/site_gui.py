@@ -252,9 +252,13 @@ class App:
         task = self.tasks[tid]
 
         def log_func(msg: str) -> None:
+            # 调试：打印到终端，确保被调用
+            print(f"[GUI-LOG] task-{tid}: {msg}")
             self.log_queue.put(("__TASK_LOG__", (tid, msg)))
 
         def progress(downloaded: int, total: int | None) -> None:
+            # 调试：打印到终端，确保被调用
+            print(f"[GUI-PROGRESS] task-{tid}: {downloaded}/{total}")
             # 同时发送进度更新和日志消息
             self.log_queue.put(("__PROGRESS__", (tid, downloaded, total)))
             # 每次进度变化都记录日志（便于调试）
@@ -367,11 +371,15 @@ class App:
         try:
             while True:
                 tag, value = self.log_queue.get_nowait()
+                # 调试：记录所有收到的消息
+                self._append_log(f"[debug-queue] 收到消息：{tag}")
+                
                 if tag == "__TASK_LOG__":
                     tid, msg = value  # type: ignore[misc]
                     self._append_log(f"[task-{tid}] {msg}")
                 elif tag == "__PROGRESS__":
                     tid, downloaded, total = value  # type: ignore[misc]
+                    self._append_log(f"[debug-progress] 进度更新：{downloaded}/{total}")
                     task = self.tasks.get(int(tid))
                     if task is not None:
                         task.downloaded_fragments = int(downloaded)
