@@ -423,11 +423,11 @@ class App:
         self.deepgram_api_key = tk.StringVar(value=_dg_key)
         self.max_duration = tk.StringVar(value="2.2")
         self.translate_enabled = tk.BooleanVar(value=True)
-        self.translate_model = tk.StringVar(value=BACKEND_DEFAULTS["qwen"]["model"])
-        self.translate_backend = tk.StringVar(value="qwen")
+        self.translate_model = tk.StringVar(value=BACKEND_DEFAULTS["minimax"]["model"])
+        self.translate_backend = tk.StringVar(value="minimax")
         self.ollama_status_text = tk.StringVar(value="检测中...")
-        self.translate_max_tokens = tk.StringVar(value="2000")
-        self.max_tokens_hint = tk.StringVar(value=TOKEN_RECOMMENDATIONS["qwen"])
+        self.translate_max_tokens = tk.StringVar(value="6000")
+        self.max_tokens_hint = tk.StringVar(value=TOKEN_RECOMMENDATIONS["minimax"])
         self.current_file_text = tk.StringVar(value="当前文件: -")
         self.asr_progress_var = tk.DoubleVar(value=0.0)
         self.asr_progress_text = tk.StringVar(value="ASR: 0.0%")
@@ -1957,6 +1957,12 @@ class App:
         backend = self._normalize_backend(backend_raw)
         self.translate_backend.set(backend)
         self.max_tokens_hint.set(TOKEN_RECOMMENDATIONS.get(backend, TOKEN_RECOMMENDATIONS["local"]))
+        current_tokens = self.translate_max_tokens.get().strip()
+        if backend == "minimax":
+            if not current_tokens or current_tokens in {"2000", "4000", "6000"}:
+                self.translate_max_tokens.set("6000")
+        elif not current_tokens:
+            self.translate_max_tokens.set("4000")
         if backend == "local":
             old_model = self.translate_model.get().strip()
             default_models = {v["model"] for v in BACKEND_DEFAULTS.values()}

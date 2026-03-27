@@ -239,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--translate-backend",
         choices=["local", "openai", "deepseek", "qwen", "minimax"],
-        default="qwen",
+        default="minimax",
         help=(
             "Translation backend. "
             "local=Ollama, openai=OpenAI, deepseek=DeepSeek, "
@@ -265,7 +265,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--translation-max-tokens",
         type=int,
-        default=4000,
+        default=6000,
         help="Approx max input tokens per translation request; subtitles are auto-split into multiple requests",
     )
     return parser.parse_args()
