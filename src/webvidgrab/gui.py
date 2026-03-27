@@ -89,7 +89,7 @@ class App:
         ttk.Combobox(
             form,
             textvariable=self.backend,
-            values=["local", "openai", "deepseek"],
+            values=["local", "openai", "deepseek", "minimax"],
             state="readonly",
         ).grid(row=2, column=1, sticky="ew", pady=4)
         ttk.Label(form, text="模型").grid(row=2, column=2, sticky=W, padx=(12, 8), pady=4)

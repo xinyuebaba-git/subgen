@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["local", "openai", "deepseek"],
+        choices=["local", "openai", "deepseek", "minimax"],
         default="local",
         help="LLM backend",
     )

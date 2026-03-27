@@ -27,6 +27,11 @@ except Exception:
             "model": "deepseek-chat",
             "env_key": "DEEPSEEK_API_KEY",
         },
+        "minimax": {
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "MiniMax/MiniMax-M2.7",
+            "env_key": "OPENCLAW_BAILIAN_API_KEY",
+        },
     }
     DEFAULT_TRANSLATE_CONFIG_PATH = (
         Path(__file__).resolve().parents[2] / "config" / "translation.toml"
@@ -47,7 +52,7 @@ except Exception:
         resolved_base_url = base_url or defaults["base_url"]
         resolved_api_key = api_key
 
-        if backend in {"openai", "deepseek"}:
+        if backend in {"openai", "deepseek", "minimax"}:
             cfg_path = (config_path or DEFAULT_TRANSLATE_CONFIG_PATH).expanduser().resolve()
             if not cfg_path.exists():
                 raise RuntimeError(
@@ -80,4 +85,3 @@ except Exception:
             "base_url": str(resolved_base_url),
             "api_key": str(resolved_api_key),
         }
-

@@ -25,6 +25,7 @@ webvidgrab-site = "webvidgrab.site_cli:main"
 webvidgrab-site-gui = "webvidgrab.site_gui:main"
 psitedl = "webvidgrab.site_cli:main"
 psitedl-gui = "webvidgrab.site_gui:main"
+school-scheduler-demo = "schoolsched_demo.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

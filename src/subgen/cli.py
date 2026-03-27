@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import json
 import os
@@ -51,6 +52,11 @@ BACKEND_DEFAULTS = {
         "model": "qwen3-max-2026-01-23",
         "env_key": "DASHSCOPE_API_KEY",
     },
+    "minimax": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "MiniMax/MiniMax-M2.7",
+        "env_key": "OPENCLAW_BAILIAN_API_KEY",
+    },
 }
 
 DEEPGRAM_ASR_MODELS = [
@@ -98,6 +104,21 @@ class SubtitleEntry:
     start: float
     end: float
     text: str
+
+
+class TranslationBackendError(RuntimeError):
+    def __init__(
+        self,
+        kind: str,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status_code = status_code
+        self.body = body
 
 
 ProgressCallback = Callable[[str, float, float, str | None], None]
@@ -217,9 +238,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--translate-backend",
-        choices=["local", "openai", "deepseek", "qwen"],
+        choices=["local", "openai", "deepseek", "qwen", "minimax"],
         default="qwen",
-        help="Translation backend. local=Ollama, openai=OpenAI, deepseek=DeepSeek, qwen=Alibaba Bailian",
+        help=(
+            "Translation backend. "
+            "local=Ollama, openai=OpenAI, deepseek=DeepSeek, "
+            "qwen=Alibaba Bailian Qwen, minimax=Alibaba Bailian MiniMax M2.7"
+        ),
     )
     parser.add_argument(
         "--translate-base-url",
@@ -261,7 +286,7 @@ def resolve_translation_settings(
     resolved_base_url = base_url or defaults["base_url"]
     resolved_api_key = api_key
 
-    if backend in {"openai", "deepseek", "qwen"}:
+    if backend in {"openai", "deepseek", "qwen", "minimax"}:
         cfg_path = (config_path or DEFAULT_TRANSLATE_CONFIG_PATH).expanduser().resolve()
         if not cfg_path.exists():
             raise RuntimeError(
@@ -1402,6 +1427,452 @@ def _chat_completion_text(
     return (response.choices[0].message.content or "").strip()
 
 
+def _normalize_chat_completions_url(base_url: str) -> str:
+    root = (base_url or "").strip().rstrip("/")
+    if root.endswith("/chat/completions"):
+        return root
+    return f"{root}/chat/completions"
+
+
+def _classify_translation_http_failure(
+    status_code: int | None,
+    body: str,
+) -> str:
+    text = body or ""
+    if status_code == 400 and "data_inspection_failed" in text:
+        if "Input data may contain inappropriate content" in text:
+            return "input_inspection"
+        if "Output data may contain inappropriate content" in text:
+            return "output_inspection"
+        return "inspection"
+    if status_code == 429:
+        return "rate_limit"
+    if status_code is None:
+        return "network"
+    return "http"
+
+
+def _openai_compatible_chat_text(
+    *,
+    model_name: str,
+    messages: list[dict[str, str]],
+    base_url: str,
+    api_key: str,
+    temperature: float = 0.1,
+) -> str:
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    headers = {"Content-Type": "application/json"}
+    key = (api_key or "").strip()
+    if key and key != "ollama":
+        headers["Authorization"] = f"Bearer {key}"
+    req = urlrequest.Request(
+        _normalize_chat_completions_url(base_url),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=180) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urlerror.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        kind = _classify_translation_http_failure(exc.code, body)
+        raise TranslationBackendError(
+            kind,
+            f"chat completion failed: HTTP {exc.code}",
+            status_code=exc.code,
+            body=body,
+        ) from exc
+    except Exception as exc:
+        raise TranslationBackendError(
+            "network",
+            f"chat completion failed: {exc}",
+        ) from exc
+
+    try:
+        obj = json.loads(body)
+        choices = obj.get("choices", []) if isinstance(obj, dict) else []
+        first = choices[0] if choices else {}
+        message = first.get("message", {}) if isinstance(first, dict) else {}
+        content = str(message.get("content") or "").strip()
+        if content:
+            return content
+    except Exception as exc:
+        raise TranslationBackendError(
+            "invalid_response",
+            f"chat completion returned invalid response: {exc}",
+            body=body[:500],
+        ) from exc
+
+    raise TranslationBackendError(
+        "invalid_response",
+        "chat completion returned empty content",
+        body=body[:500],
+    )
+
+
+def _is_bailian_remote_backend(model_name: str, base_url: str) -> bool:
+    b = (base_url or "").strip().lower()
+    m = (model_name or "").strip().lower()
+    if "localhost:11434" in b or "127.0.0.1:11434" in b:
+        return False
+    return (
+        "dashscope" in b
+        or m.startswith("qwen")
+        or "qwen" in m
+        or m.startswith("minimax")
+        or "minimax" in m
+    )
+
+
+def _is_qwen_remote_backend(model_name: str, base_url: str) -> bool:
+    b = (base_url or "").strip().lower()
+    m = (model_name or "").strip().lower()
+    if "localhost:11434" in b or "127.0.0.1:11434" in b:
+        return False
+    return ("dashscope" in b and "qwen" in m) or m.startswith("qwen") or "qwen" in m
+
+
+def _build_resilient_translation_batches(
+    entries: Sequence[SubtitleEntry],
+    max_tokens: int,
+    *,
+    max_entries: int = 10,
+) -> list[tuple[int, int]]:
+    if not entries:
+        return []
+    per_batch_budget = max(300, int(max_tokens * 0.55))
+    batches: list[tuple[int, int]] = []
+    i = 0
+    n = len(entries)
+    while i < n:
+        used = 120
+        j = i
+        while j < n and (j - i) < max_entries:
+            line_tokens = _estimate_tokens(entries[j].text) + 18
+            if j > i and used + line_tokens > per_batch_budget:
+                break
+            used += line_tokens
+            j += 1
+        if j == i:
+            j += 1
+        batches.append((i, j))
+        i = j
+    return batches
+
+
+def _build_resilient_chunk_prompt(
+    entries: Sequence[SubtitleEntry],
+    start: int,
+    end: int,
+    *,
+    mode: str,
+    context_size: int = 4,
+    strict_markers: bool = False,
+) -> str:
+    before_entries = entries[max(0, start - context_size) : start]
+    target_entries = entries[start:end]
+    after_entries = entries[end : min(len(entries), end + context_size)]
+
+    def _fmt_raw(items: Sequence[SubtitleEntry]) -> str:
+        return "\n".join(f"[{item.index:04d}] {item.text}" for item in items) or "(none)"
+
+    def _fmt_b64(items: Sequence[SubtitleEntry]) -> str:
+        out = []
+        for item in items:
+            enc = base64.b64encode((item.text or "").encode("utf-8")).decode("ascii")
+            out.append(f"[{item.index:04d}] {enc}")
+        return "\n".join(out) or "(none)"
+
+    if mode == "raw":
+        before = _fmt_raw(before_entries)
+        target = _fmt_raw(target_entries)
+        after = _fmt_raw(after_entries)
+        intro = "Translate the TARGET subtitle lines into natural, accurate Simplified Chinese."
+        extra = (
+            "Important:\n"
+            "- Many subtitle lines are incomplete sentence fragments split by timing.\n"
+            "- Translate them as Chinese subtitle fragments that connect naturally across neighboring lines.\n"
+            "- Do not invent missing information just to make each line standalone.\n"
+        )
+        labels = "text"
+    elif mode in {"b64", "b64_soft"}:
+        before = _fmt_b64(before_entries)
+        target = _fmt_b64(target_entries)
+        after = _fmt_b64(after_entries)
+        intro = (
+            "Each line below has a marker and a Base64-encoded English subtitle text. "
+            "Decode the Base64 text, understand the meaning with context, then translate only the TARGET lines into natural Simplified Chinese."
+        )
+        extra = (
+            "Important:\n"
+            "- Many subtitle lines are incomplete sentence fragments split by timing.\n"
+            "- Translate them as Chinese subtitle fragments that connect naturally across neighboring lines.\n"
+        )
+        if mode == "b64_soft":
+            extra += (
+                "- Use mild euphemistic wording for highly explicit anatomical terms and sex actions while preserving the meaning and tone.\n"
+            )
+        else:
+            extra += "- Do not invent missing information just to make each line standalone.\n"
+        extra += "- Decode the Base64 text before translating.\n"
+        labels = "Base64 text"
+    else:
+        raise ValueError(f"Unsupported resilient translation mode: {mode}")
+
+    strict = ""
+    if strict_markers:
+        strict = (
+            "IMPORTANT:\n"
+            "- Return every TARGET marker exactly once.\n"
+            "- Do not skip any TARGET marker.\n"
+            "- Do not output any marker that is not in TARGET LINES.\n"
+        )
+
+    return (
+        f"{intro}\n"
+        "Use the BEFORE and AFTER context to understand incomplete sentences, but translate only the TARGET lines.\n\n"
+        f"{extra}{strict}"
+        "Rules:\n"
+        "- Keep every TARGET marker exactly as-is.\n"
+        "- Output exactly one translated line for each TARGET line.\n"
+        "- Do not output BEFORE or AFTER lines.\n"
+        "- Do not merge, omit, reorder, or add markers.\n"
+        "- Translate only the text after each marker.\n"
+        "- Keep names and references consistent when possible.\n"
+        "- Output plain text only.\n\n"
+        f"BEFORE CONTEXT ({labels}):\n{before}\n\n"
+        f"TARGET LINES ({labels}):\n{target}\n\n"
+        f"AFTER CONTEXT ({labels}):\n{after}\n"
+    )
+
+
+def _parse_marked_translation_lines(text: str) -> dict[int, str]:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", text)
+    text = re.sub(r"\n```\s*$", "", text).strip()
+    mapping: dict[int, str] = {}
+    current: int | None = None
+    for raw_line in text.split("\n"):
+        line = raw_line.strip().rstrip("  ")
+        if not line:
+            continue
+        m = re.match(r"^\[(\d{4})\]\s*(.*)$", line)
+        if m:
+            current = int(m.group(1))
+            mapping[current] = m.group(2).strip()
+        elif current is not None:
+            mapping[current] = (mapping[current] + " " + line).strip()
+    return mapping
+
+
+def _translate_marked_chunk_mode(
+    entries: Sequence[SubtitleEntry],
+    *,
+    start: int,
+    end: int,
+    model_name: str,
+    base_url: str,
+    api_key: str,
+    mode: str,
+) -> dict[int, str]:
+    expected_ids = [item.index for item in entries[start:end]]
+    last_error: TranslationBackendError | None = None
+    for strict_markers in (False, True):
+        prompt = _build_resilient_chunk_prompt(
+            entries,
+            start,
+            end,
+            mode=mode,
+            strict_markers=strict_markers,
+        )
+        try:
+            text = _openai_compatible_chat_text(
+                model_name=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert subtitle translator from English to Simplified Chinese "
+                            "with strict marker preservation."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                base_url=base_url,
+                api_key=api_key,
+                temperature=0.1,
+            )
+        except TranslationBackendError as exc:
+            last_error = exc
+            if exc.kind in {"input_inspection", "output_inspection", "inspection"}:
+                break
+            continue
+
+        mapping = _parse_marked_translation_lines(text)
+        missing = [idx for idx in expected_ids if idx not in mapping or not mapping[idx].strip()]
+        extra = [idx for idx in mapping if idx not in expected_ids]
+        if not missing and not extra:
+            return {idx: mapping[idx].strip() for idx in expected_ids}
+        last_error = TranslationBackendError(
+            "marker_mismatch",
+            f"marker mismatch: missing={missing} extra={extra}",
+        )
+    if last_error is None:
+        last_error = TranslationBackendError("unknown", "chunk translation failed")
+    raise last_error
+
+
+def _google_translate_plain_line(text: str) -> str:
+    url = (
+        "https://translate.googleapis.com/translate_a/single"
+        "?client=gtx&sl=en&tl=zh-CN&dt=t&q="
+        + urlparse.quote(text)
+    )
+    try:
+        with urlrequest.urlopen(url, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        payload = json.loads(raw)
+    except Exception as exc:
+        raise TranslationBackendError(
+            "google_failed",
+            f"google translate failed: {exc}",
+        ) from exc
+    if not isinstance(payload, list) or not payload:
+        raise TranslationBackendError(
+            "google_failed",
+            "google translate returned invalid payload",
+        )
+    try:
+        return "".join(part[0] for part in payload[0] if isinstance(part, list)).strip()
+    except Exception as exc:
+        raise TranslationBackendError(
+            "google_failed",
+            f"google translate payload parse failed: {exc}",
+        ) from exc
+
+
+def _google_translate_chunk(
+    entries: Sequence[SubtitleEntry],
+    *,
+    start: int,
+    end: int,
+) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for item in entries[start:end]:
+        out[item.index] = _google_translate_plain_line(item.text)
+    return out
+
+
+def translate_entries_layered_resilient(
+    entries: Sequence[SubtitleEntry],
+    model_name: str,
+    max_tokens: int,
+    base_url: str,
+    api_key: str,
+    progress_label: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> list[str]:
+    if not entries:
+        return []
+
+    batches = _build_resilient_translation_batches(entries, max_tokens=max_tokens)
+    output = [e.text for e in entries]
+    progress = _make_progress_bar(
+        task="Translate",
+        total=len(entries),
+        unit="line",
+        progress_label=progress_label,
+    )
+    translated_count = 0.0
+    total_count = float(len(entries))
+    _emit_progress(
+        progress_callback,
+        task="translate",
+        current=0.0,
+        total=total_count,
+        label=progress_label,
+    )
+    _emit_progress(
+        progress_callback,
+        task="align",
+        current=0.0,
+        total=total_count,
+        label=progress_label,
+    )
+
+    try:
+        for batch_start, batch_end in batches:
+            translated_map: dict[int, str] | None = None
+            last_error: TranslationBackendError | None = None
+            for mode in ("raw", "b64", "b64_soft"):
+                try:
+                    translated_map = _translate_marked_chunk_mode(
+                        entries,
+                        start=batch_start,
+                        end=batch_end,
+                        model_name=model_name,
+                        base_url=base_url,
+                        api_key=api_key,
+                        mode=mode,
+                    )
+                    break
+                except TranslationBackendError as exc:
+                    last_error = exc
+                    if exc.kind not in {
+                        "input_inspection",
+                        "output_inspection",
+                        "inspection",
+                        "marker_mismatch",
+                        "invalid_response",
+                    }:
+                        raise
+            if translated_map is None:
+                if last_error and last_error.kind not in {
+                    "input_inspection",
+                    "output_inspection",
+                    "inspection",
+                    "marker_mismatch",
+                    "invalid_response",
+                }:
+                    raise last_error
+                translated_map = _google_translate_chunk(
+                    entries,
+                    start=batch_start,
+                    end=batch_end,
+                )
+
+            for idx in range(batch_start, batch_end):
+                entry = entries[idx]
+                output[idx] = translated_map.get(entry.index, "").strip() or entry.text
+                progress.update(1)
+                translated_count += 1.0
+                _emit_progress(
+                    progress_callback,
+                    task="translate",
+                    current=translated_count,
+                    total=total_count,
+                    label=progress_label,
+                )
+        _emit_progress(
+            progress_callback,
+            task="align",
+            current=total_count,
+            total=total_count,
+            label=progress_label,
+        )
+        return output
+    finally:
+        progress.close()
+
+
 def _translate_single_line(
     client,
     model_name: str,
@@ -1910,6 +2381,22 @@ def translate_fulltext_then_llm_refill(
 ) -> list[str]:
     if not entries:
         return []
+
+    if _is_bailian_remote_backend(model_name, base_url):
+        try:
+            return translate_entries_layered_resilient(
+                entries,
+                model_name=model_name,
+                max_tokens=max_tokens,
+                base_url=base_url,
+                api_key=api_key,
+                progress_label=progress_label,
+                progress_callback=progress_callback,
+            )
+        except Exception:
+            # Fall back to the legacy full-text + refill path if the resilient
+            # chunked strategy still fails unexpectedly.
+            pass
 
     from openai import OpenAI
 
