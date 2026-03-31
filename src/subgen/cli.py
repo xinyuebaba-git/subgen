@@ -6,8 +6,10 @@ import difflib
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +69,11 @@ DEEPGRAM_ASR_MODELS = [
 ]
 _LAST_DEEPGRAM_DETECTED_LANGUAGE = ""
 _LAST_DEEPGRAM_LANGUAGE_CONFIDENCE = 0.0
+DEEPGRAM_SEGMENT_THRESHOLD_SECONDS = 12 * 60
+DEEPGRAM_SEGMENT_SECONDS = 8 * 60
+DEEPGRAM_SEGMENT_OVERLAP_SECONDS = 2.0
+DEEPGRAM_MIN_SEGMENT_SECONDS = 90.0
+DEEPGRAM_REQUEST_MAX_ATTEMPTS = 3
 
 QWEN25_OLLAMA_TRANSLATION_OPTIONS: dict[str, Any] = {
     # Based on Qwen docs baseline (temperature/top_k/top_p/repeat_penalty) with
@@ -509,30 +516,47 @@ def transcribe_with_deepgram(
     if not api_key.strip():
         raise RuntimeError("Deepgram API key 为空。请设置 --deepgram-api-key 或环境变量 DEEPGRAM_API_KEY")
 
-    audio_bytes = video_path.read_bytes()
-    params = {
-        "model": model_name or "nova-3",
-        "smart_format": "true",
-        "punctuate": "true",
-        "utterances": "true",
-        "diarize": "false",
-    }
-    if source_language:
-        params["language"] = source_language
-    else:
-        # Ask Deepgram to auto-detect source language when not explicitly set.
-        params["detect_language"] = "true"
-    url = "https://api.deepgram.com/v1/listen?" + urlparse.urlencode(params)
-    req = urlrequest.Request(
-        url,
-        data=audio_bytes,
-        headers={
-            "Authorization": f"Token {api_key.strip()}",
-            "Content-Type": "application/octet-stream",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
+    total_duration = _probe_media_duration(video_path)
+    model_name = model_name or "nova-3"
+    if total_duration > DEEPGRAM_SEGMENT_THRESHOLD_SECONDS:
+        _LAST_DEEPGRAM_DETECTED_LANGUAGE = ""
+        _LAST_DEEPGRAM_LANGUAGE_CONFIDENCE = 0.0
+        _emit_progress(
+            progress_callback,
+            task="asr",
+            current=0.0,
+            total=total_duration,
+            label=progress_label,
+        )
+        merged_entries: list[SubtitleEntry] = []
+        for seg_start, seg_end in _plan_deepgram_segments(total_duration):
+            chunk_entries, detected_lang, confidence = _transcribe_deepgram_window(
+                video_path=video_path,
+                start=seg_start,
+                end=seg_end,
+                source_language=source_language,
+                api_key=api_key,
+                model_name=model_name,
+                max_segment_duration=max_segment_duration,
+                max_segment_chars=max_segment_chars,
+            )
+            if confidence >= _LAST_DEEPGRAM_LANGUAGE_CONFIDENCE:
+                _LAST_DEEPGRAM_DETECTED_LANGUAGE = detected_lang
+                _LAST_DEEPGRAM_LANGUAGE_CONFIDENCE = confidence
+            merged_entries = _merge_deepgram_chunk_entries(
+                merged_entries,
+                chunk_entries,
+                overlap_start=seg_start,
+                overlap_seconds=DEEPGRAM_SEGMENT_OVERLAP_SECONDS,
+            )
+            _emit_progress(
+                progress_callback,
+                task="asr",
+                current=seg_end,
+                total=total_duration,
+                label=progress_label,
+            )
+        return _renumber_entries(merged_entries)
 
     _emit_progress(
         progress_callback,
@@ -541,19 +565,286 @@ def transcribe_with_deepgram(
         total=1.0,
         label=progress_label,
     )
-    try:
-        with urlrequest.urlopen(req, timeout=600) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
-    except urlerror.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="ignore")
-        except Exception:
-            body = ""
-        raise RuntimeError(f"Deepgram 请求失败: HTTP {exc.code} {body[:240]}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Deepgram 请求失败: {exc}") from exc
+    payload = _deepgram_listen_bytes(
+        media_bytes=video_path.read_bytes(),
+        content_type="application/octet-stream",
+        source_language=source_language,
+        api_key=api_key,
+        model_name=model_name,
+    )
+    entries, detected_lang, confidence = _deepgram_payload_to_entries(
+        payload=payload,
+        max_segment_duration=max_segment_duration,
+        max_segment_chars=max_segment_chars,
+        time_offset=0.0,
+    )
+    _LAST_DEEPGRAM_DETECTED_LANGUAGE = detected_lang
+    _LAST_DEEPGRAM_LANGUAGE_CONFIDENCE = confidence
+    _emit_progress(
+        progress_callback,
+        task="asr",
+        current=1.0,
+        total=1.0,
+        label=progress_label,
+    )
+    return entries
 
+
+def _probe_media_duration(path: Path) -> float:
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+        ).strip()
+        return max(0.0, float(out or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _plan_deepgram_segments(
+    total_duration: float,
+    *,
+    chunk_duration: float = DEEPGRAM_SEGMENT_SECONDS,
+    overlap: float = DEEPGRAM_SEGMENT_OVERLAP_SECONDS,
+) -> list[tuple[float, float]]:
+    if total_duration <= 0:
+        return [(0.0, 0.0)]
+    segments: list[tuple[float, float]] = []
+    start = 0.0
+    chunk_duration = max(60.0, chunk_duration)
+    overlap = max(0.0, min(overlap, chunk_duration / 4))
+    while start < total_duration:
+        end = min(total_duration, start + chunk_duration)
+        if total_duration - end <= overlap + 30.0:
+            end = total_duration
+        segments.append((round(start, 3), round(end, 3)))
+        if end >= total_duration:
+            break
+        start = max(0.0, end - overlap)
+    return segments
+
+
+def _extract_audio_segment_bytes(
+    *,
+    video_path: Path,
+    start: float,
+    duration: float,
+) -> bytes:
+    try:
+        return subprocess.check_output(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-ss",
+                f"{max(0.0, start):.3f}",
+                "-t",
+                f"{max(0.1, duration):.3f}",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "flac",
+                "-f",
+                "flac",
+                "pipe:1",
+            ],
+            stderr=subprocess.STDOUT,
+            timeout=max(120, int(duration * 2.5)),
+        )
+    except subprocess.CalledProcessError as exc:
+        body = exc.output.decode("utf-8", errors="ignore") if exc.output else ""
+        raise RuntimeError(f"ffmpeg 切分音频失败: {body[:240]}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"ffmpeg 切分音频失败: {exc}") from exc
+
+
+def _looks_like_deepgram_retryable_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "timeout",
+            "timed out",
+            "time out",
+            "unexpected eof",
+            "eof occurred in violation of protocol",
+            "ssl",
+            "connection reset",
+            "connection aborted",
+            "temporarily unavailable",
+            "remote end closed connection",
+            "http 408",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "http 524",
+        )
+    )
+
+
+def _transcribe_deepgram_window(
+    *,
+    video_path: Path,
+    start: float,
+    end: float,
+    source_language: str | None,
+    api_key: str,
+    model_name: str,
+    max_segment_duration: float,
+    max_segment_chars: int,
+) -> tuple[list[SubtitleEntry], str, float]:
+    window_duration = max(0.1, end - start)
+    try:
+        segment_bytes = _extract_audio_segment_bytes(
+            video_path=video_path,
+            start=start,
+            duration=window_duration,
+        )
+        payload = _deepgram_listen_bytes(
+            media_bytes=segment_bytes,
+            content_type="audio/flac",
+            source_language=source_language,
+            api_key=api_key,
+            model_name=model_name,
+        )
+        return _deepgram_payload_to_entries(
+            payload=payload,
+            max_segment_duration=max_segment_duration,
+            max_segment_chars=max_segment_chars,
+            time_offset=start,
+        )
+    except RuntimeError as exc:
+        if not _looks_like_deepgram_retryable_error(exc) or window_duration <= DEEPGRAM_MIN_SEGMENT_SECONDS * 2:
+            raise
+        split_mid = start + window_duration / 2.0
+        overlap = min(
+            DEEPGRAM_SEGMENT_OVERLAP_SECONDS,
+            max(0.5, window_duration / 20.0),
+        )
+        left_entries, left_lang, left_conf = _transcribe_deepgram_window(
+            video_path=video_path,
+            start=start,
+            end=min(end, split_mid + overlap / 2.0),
+            source_language=source_language,
+            api_key=api_key,
+            model_name=model_name,
+            max_segment_duration=max_segment_duration,
+            max_segment_chars=max_segment_chars,
+        )
+        right_start = max(start, split_mid - overlap / 2.0)
+        right_entries, right_lang, right_conf = _transcribe_deepgram_window(
+            video_path=video_path,
+            start=right_start,
+            end=end,
+            source_language=source_language,
+            api_key=api_key,
+            model_name=model_name,
+            max_segment_duration=max_segment_duration,
+            max_segment_chars=max_segment_chars,
+        )
+        merged = _merge_deepgram_chunk_entries(
+            left_entries,
+            right_entries,
+            overlap_start=right_start,
+            overlap_seconds=min(end, split_mid + overlap / 2.0) - right_start,
+        )
+        if right_conf >= left_conf:
+            return merged, right_lang, right_conf
+        return merged, left_lang, left_conf
+
+
+def _deepgram_listen_bytes(
+    *,
+    media_bytes: bytes,
+    content_type: str,
+    source_language: str | None,
+    api_key: str,
+    model_name: str,
+) -> dict[str, Any]:
+    params = {
+        "model": model_name,
+        "smart_format": "true",
+        "punctuate": "true",
+        "utterances": "true",
+        "diarize": "false",
+    }
+    if source_language:
+        params["language"] = source_language
+    else:
+        params["detect_language"] = "true"
+    url = "https://api.deepgram.com/v1/listen?" + urlparse.urlencode(params)
+    req = urlrequest.Request(
+        url,
+        data=media_bytes,
+        headers={
+            "Authorization": f"Token {api_key.strip()}",
+            "Content-Type": content_type,
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    last_error: RuntimeError | None = None
+    for attempt in range(1, DEEPGRAM_REQUEST_MAX_ATTEMPTS + 1):
+        try:
+            with urlrequest.urlopen(req, timeout=600) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="ignore"))
+        except urlerror.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                body = ""
+            err = RuntimeError(f"Deepgram 请求失败: HTTP {exc.code} {body[:240]}")
+            if attempt >= DEEPGRAM_REQUEST_MAX_ATTEMPTS or not _looks_like_deepgram_retryable_error(err):
+                raise err from exc
+            last_error = err
+        except urlerror.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            err = RuntimeError(f"Deepgram 请求失败: {reason}")
+            if attempt >= DEEPGRAM_REQUEST_MAX_ATTEMPTS or not _looks_like_deepgram_retryable_error(err):
+                raise err from exc
+            last_error = err
+        except ssl.SSLError as exc:
+            err = RuntimeError(f"Deepgram 请求失败: {exc}")
+            if attempt >= DEEPGRAM_REQUEST_MAX_ATTEMPTS or not _looks_like_deepgram_retryable_error(err):
+                raise err from exc
+            last_error = err
+        except Exception as exc:
+            err = RuntimeError(f"Deepgram 请求失败: {exc}")
+            if attempt >= DEEPGRAM_REQUEST_MAX_ATTEMPTS or not _looks_like_deepgram_retryable_error(err):
+                raise err from exc
+            last_error = err
+        time.sleep(min(2.0, 0.4 * attempt))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Deepgram 请求失败: 未知错误")
+
+
+def _deepgram_payload_to_entries(
+    *,
+    payload: dict[str, Any],
+    max_segment_duration: float,
+    max_segment_chars: int,
+    time_offset: float,
+) -> tuple[list[SubtitleEntry], str, float]:
     channels = (
         payload.get("results", {}).get("channels", [])
         if isinstance(payload, dict)
@@ -570,8 +861,6 @@ def transcribe_with_deepgram(
         confidence = float(alt.get("language_confidence") or 0.0)
     except Exception:
         confidence = 0.0
-    _LAST_DEEPGRAM_DETECTED_LANGUAGE = detected_lang
-    _LAST_DEEPGRAM_LANGUAGE_CONFIDENCE = confidence
     words_raw = alt.get("words", []) if isinstance(alt, dict) else []
     words = []
     for w in words_raw if isinstance(words_raw, list) else []:
@@ -579,8 +868,8 @@ def transcribe_with_deepgram(
             continue
         words.append(
             SimpleNamespace(
-                start=w.get("start"),
-                end=w.get("end"),
+                start=(float(w.get("start") or 0.0) + time_offset),
+                end=(float(w.get("end") or 0.0) + time_offset),
                 word=w.get("word"),
             )
         )
@@ -589,16 +878,16 @@ def transcribe_with_deepgram(
         if isinstance(payload, dict)
         else 0.0
     )
-    end_time = duration
-    if end_time <= 0 and words:
-        end_time = float(words[-1].end or 0.0)
-    if end_time <= 0:
-        end_time = 1.0
+    end_time = time_offset + duration
+    if duration <= 0 and words:
+        end_time = float(words[-1].end or time_offset)
+    if end_time <= time_offset:
+        end_time = time_offset + 1.0
 
     splits = split_segment_words(
         words=words,
         text_fallback=transcript,
-        start=0.0,
+        start=time_offset,
         end=end_time,
         max_duration=max_segment_duration,
         max_chars=max_segment_chars,
@@ -615,15 +904,46 @@ def transcribe_with_deepgram(
                 text=t,
             )
         )
+    return entries, detected_lang, confidence
 
-    _emit_progress(
-        progress_callback,
-        task="asr",
-        current=1.0,
-        total=1.0,
-        label=progress_label,
-    )
-    return entries
+
+def _merge_deepgram_chunk_entries(
+    existing: Sequence[SubtitleEntry],
+    incoming: Sequence[SubtitleEntry],
+    *,
+    overlap_start: float,
+    overlap_seconds: float,
+) -> list[SubtitleEntry]:
+    merged = list(existing)
+    pending = list(incoming)
+    overlap_end = overlap_start + overlap_seconds + 0.5
+    while merged and pending:
+        prev = merged[-1]
+        cur = pending[0]
+        prev_norm = _norm_for_compare(prev.text)
+        cur_norm = _norm_for_compare(cur.text)
+        similar = bool(prev_norm and cur_norm) and (
+            prev_norm == cur_norm or _similarity(prev_norm, cur_norm) >= 0.88
+        )
+        boundary_overlap = cur.start <= overlap_end or cur.start <= prev.end + 0.6
+        if similar and boundary_overlap:
+            pending.pop(0)
+            continue
+        break
+    merged.extend(pending)
+    return _renumber_entries(merged)
+
+
+def _renumber_entries(entries: Sequence[SubtitleEntry]) -> list[SubtitleEntry]:
+    return [
+        SubtitleEntry(
+            index=idx + 1,
+            start=entry.start,
+            end=entry.end,
+            text=entry.text,
+        )
+        for idx, entry in enumerate(entries)
+    ]
 
 
 def get_last_deepgram_detected_language() -> tuple[str, float]:
