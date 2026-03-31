@@ -501,6 +501,7 @@ def _capture_runtime_candidates(
     browser: str,
     profile: str,
     seconds: int,
+    headless: bool,
     log: Callable[[str], None],
 ) -> list[str]:
     try:
@@ -531,17 +532,18 @@ def _capture_runtime_candidates(
                         context = p.chromium.launch_persistent_context(
                             user_data_dir=str(base),
                             channel="chrome",
-                            headless=False,
+                            headless=headless,
                             args=[f"--profile-directory={profile_arg}"],
                         )
                         page = context.pages[0] if context.pages else context.new_page()
                     except Exception as exc:
                         log(f"[runtime-capture] 复用Chrome会话失败: {exc}")
             if context is None or page is None:
-                b = p.chromium.launch(channel="chrome", headless=False)
+                b = p.chromium.launch(channel="chrome", headless=headless)
                 context = b.new_context()
                 page = context.new_page()
-                log("[runtime-capture] 使用临时上下文。")
+                mode = "后台静默" if headless else "可视窗口"
+                log(f"[runtime-capture] 使用临时上下文（{mode}）。")
 
             if cookies_file and cookies_file.exists():
                 injected = _inject_cookies(context, url, cookies_file)
@@ -776,6 +778,7 @@ def run_site_download(
     profile: str = "Default",
     capture_seconds: int = 30,
     use_runtime_capture: bool = True,
+    headless: bool = True,
     log_func: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
     use_rich_progress: bool = True,
@@ -820,11 +823,13 @@ def run_site_download(
         if use_runtime_capture:
             if rich_handler:
                 rich_handler.set_filename(f"捕获中... ({capture_seconds}s)")
+            log(f"[runtime-capture-mode] {'headless' if headless else 'headed'}")
             runtime_candidates = _capture_runtime_candidates(
                 url=page_url,
                 browser=browser,
                 profile=profile,
                 seconds=max(10, int(capture_seconds)),
+                headless=headless,
                 log=log,
             )
             log(f"[runtime-candidates] {len(runtime_candidates)}")
@@ -908,6 +913,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--capture-seconds", type=int, default=30)
     p.add_argument("--no-runtime-capture", action="store_true")
     p.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Show the browser window during runtime capture instead of using headless mode",
+    )
+    p.add_argument(
         "--concurrent",
         action="store_true",
         help="Enable concurrent download mode for multiple URLs",
@@ -961,6 +971,7 @@ def _download_single_url(
     profile: str,
     capture_seconds: int,
     use_runtime_capture: bool,
+    headless: bool,
     idx: int,
     total: int,
     use_rich: bool = True,
@@ -975,6 +986,7 @@ def _download_single_url(
             profile=profile,
             capture_seconds=max(10, int(capture_seconds)),
             use_runtime_capture=use_runtime_capture,
+            headless=headless,
             log_func=print,
             use_rich_progress=use_rich,
         )
@@ -996,6 +1008,7 @@ async def download_batch_async(
     profile: str = "Default",
     capture_seconds: int = 30,
     use_runtime_capture: bool = True,
+    headless: bool = True,
     max_workers: int = 3,
     use_rich: bool = True,
 ) -> tuple[list[BatchDownloadResult], int, int]:
@@ -1031,6 +1044,7 @@ async def download_batch_async(
                 profile,
                 capture_seconds,
                 use_runtime_capture,
+                headless,
                 idx,
                 len(urls),
                 use_rich,
@@ -1080,6 +1094,7 @@ def main() -> int:
                 profile=args.profile,
                 capture_seconds=max(10, int(args.capture_seconds)),
                 use_runtime_capture=not args.no_runtime_capture,
+                headless=not args.show_browser,
                 max_workers=args.max_workers,
             )
         )
@@ -1096,6 +1111,7 @@ def main() -> int:
                 profile=args.profile,
                 capture_seconds=max(10, int(args.capture_seconds)),
                 use_runtime_capture=not args.no_runtime_capture,
+                headless=not args.show_browser,
                 idx=idx,
                 total=len(urls),
                 use_rich=use_rich,

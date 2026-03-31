@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="80" x2="0" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a2a2e"/>
+      <stop offset="0.56" stop-color="#1f1f22"/>
+      <stop offset="1" stop-color="#151516"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="322" y1="232" x2="760" y2="776" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffb066"/>
+      <stop offset="0.38" stop-color="#ff8f3a"/>
+      <stop offset="1" stop-color="#ff6b00"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="52%" cy="42%" r="40%">
+      <stop offset="0" stop-color="#ff8d3a" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#ff8d3a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="highlight" x1="0" y1="96" x2="0" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="80" y="80" width="864" height="864" rx="220" fill="#101010"/>
+  <rect x="68" y="94" width="888" height="874" rx="228" fill="#0f0f10" opacity="0.74"/>
+  <rect x="80" y="80" width="864" height="864" rx="220" fill="url(#bg)"/>
+  <rect x="80" y="80" width="864" height="864" rx="220" fill="url(#highlight)"/>
+  <rect x="80.5" y="80.5" width="863" height="863" rx="219.5" fill="none" stroke="#3a3a3c"/>
+
+  <ellipse cx="548" cy="438" rx="286" ry="252" fill="url(#glow)"/>
+
+  <path
+    d="M352 764 V270 H544
+       C672 270 748 338 748 446
+       C748 552 672 620 544 620
+       H352"
+    fill="none"
+    stroke="url(#orange)"
+    stroke-width="76"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <path
+    d="M606 336
+       C564 306 476 312 476 388
+       C476 468 642 440 642 532
+       C642 610 558 652 462 612"
+    fill="none"
+    stroke="#f5f5f7"
+    stroke-width="58"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <path
+    d="M334 786 H602"
+    fill="none"
+    stroke="url(#orange)"
+    stroke-width="34"
+    stroke-linecap="round"
+    opacity="0.88"
+  />
+</svg>
